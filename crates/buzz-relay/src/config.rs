@@ -357,6 +357,10 @@ pub struct Config {
     /// documents or age attestation are configured.
     pub join_policy: Option<JoinPolicyConfig>,
 
+    /// Optional DNTLS introducer base URL (`BUZZ_DNTLS_INTRODUCER_URL`).
+    /// When unset, every `/api/dntls` route returns 404.
+    pub dntls_introducer_url: Option<String>,
+
     /// Deployment-admin API and SPA configuration. Absent means the surface is disabled.
     pub admin: Option<AdminConfig>,
 
@@ -1180,6 +1184,26 @@ impl Config {
             .map(|value| value == "true" || value == "1")
             .unwrap_or(false);
 
+        let dntls_introducer_url = std::env::var("BUZZ_DNTLS_INTRODUCER_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                let parsed = url::Url::parse(&value).map_err(|e| {
+                    ConfigError::InvalidValue(format!(
+                        "BUZZ_DNTLS_INTRODUCER_URL must be a valid http:// or https:// URL: {e}"
+                    ))
+                })?;
+                if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+                    return Err(ConfigError::InvalidValue(
+                        "BUZZ_DNTLS_INTRODUCER_URL must be a valid http:// or https:// URL"
+                            .to_string(),
+                    ));
+                }
+                Ok(value.trim_end_matches('/').to_string())
+            })
+            .transpose()?;
+
         if let Some(ref dir) = web_dir {
             if !dir.join("index.html").is_file() {
                 return Err(ConfigError::InvalidValue(format!(
@@ -1254,6 +1278,7 @@ impl Config {
             push_gateway_delivery_url,
             push_gateway_timeout,
             join_policy,
+            dntls_introducer_url,
             admin,
             web_dir,
             serve_git_web_gui,
@@ -2321,6 +2346,29 @@ mod tests {
         assert!(matches!(
             result,
             Err(ConfigError::InvalidValue(ref msg)) if msg.contains("BUZZ_PAIRING_RELAY_URL")
+        ));
+    }
+
+    #[test]
+    fn dntls_introducer_url_accepts_http_urls_and_rejects_ws() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var("BUZZ_DNTLS_INTRODUCER_URL").ok();
+        std::env::set_var("BUZZ_DNTLS_INTRODUCER_URL", "http://127.0.0.1:8787/");
+        let config = Config::from_env().expect("config");
+        assert_eq!(
+            config.dntls_introducer_url.as_deref(),
+            Some("http://127.0.0.1:8787")
+        );
+
+        std::env::set_var("BUZZ_DNTLS_INTRODUCER_URL", "ws://127.0.0.1:8787");
+        let result = Config::from_env();
+        std::env::remove_var("BUZZ_DNTLS_INTRODUCER_URL");
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_DNTLS_INTRODUCER_URL", value);
+        }
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref msg)) if msg.contains("BUZZ_DNTLS_INTRODUCER_URL")
         ));
     }
 

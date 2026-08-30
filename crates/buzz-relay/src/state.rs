@@ -741,6 +741,16 @@ pub struct AppState {
     /// generate fresh Nostr keys.
     pub invite_claim_rate_limiter:
         Arc<moka::sync::Cache<ScopedPubkeyKey, Arc<std::sync::atomic::AtomicU32>>>,
+    /// Per-joiner fixed-window rate limiter for DNTLS join attempts
+    /// (`POST /api/dntls/join`). Same window, limit, and capacity as invite
+    /// claims: pre-membership callers can cheaply generate fresh Nostr keys.
+    pub dntls_join_rate_limiter:
+        Arc<moka::sync::Cache<ScopedPubkeyKey, Arc<std::sync::atomic::AtomicU32>>>,
+    /// Single-use DNTLS join challenges, keyed by (community, pubkey).
+    /// Newer mint replaces older; entries expire after five minutes.
+    pub dntls_join_challenges: Arc<moka::sync::Cache<ScopedPubkeyKey, [u8; 32]>>,
+    /// DNTLS introducer used to verify join proofs. Tests replace this with a stub.
+    pub dntls_introducer: Arc<dyn crate::api::dntls::IntroducerClient>,
     /// Current in-flight media uploads per (community, uploader pubkey).
     pub media_uploads_in_flight: Arc<DashMap<ScopedPubkeyKey, u32>>,
     /// Cache for observer agent-owner authorization (kind 24200).
@@ -926,6 +936,19 @@ impl AppState {
                     .time_to_live(crate::api::invites::CLAIM_RATE_WINDOW)
                     .build(),
             ),
+            dntls_join_rate_limiter: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(crate::api::invites::CLAIM_RATE_CACHE_CAPACITY)
+                    .time_to_live(crate::api::invites::CLAIM_RATE_WINDOW)
+                    .build(),
+            ),
+            dntls_join_challenges: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(crate::api::dntls::CHALLENGE_CACHE_CAPACITY)
+                    .time_to_live(crate::api::dntls::CHALLENGE_TTL)
+                    .build(),
+            ),
+            dntls_introducer: Arc::new(crate::api::dntls::HttpIntroducer::new()),
             media_uploads_in_flight: Arc::new(DashMap::new()),
             observer_owner_cache: Arc::new(
                 moka::sync::Cache::builder()

@@ -121,6 +121,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(api::invites::accept_policy),
         )
         .route("/api/invites/claim", post(api::invites::claim_invite))
+        .route(
+            "/api/dntls/join/challenge",
+            post(api::dntls::join_challenge),
+        )
+        .route("/api/dntls/join", post(api::dntls::join))
+        .route("/api/dntls/pending", get(api::dntls::pending))
+        .route("/api/dntls/approve", post(api::dntls::approve))
+        .route("/api/dntls/reject", post(api::dntls::reject))
+        .route("/api/dntls/names", get(api::dntls::names))
         // Moderation queue reads (NIP-98 auth + mod-authz gate, L6)
         .route("/moderation/reports", get(api::bridge::moderation_reports))
         .route("/moderation/audit", get(api::bridge::moderation_audit))
