@@ -496,11 +496,16 @@ pub async fn names(
         .await
         .map_err(|e| internal_error(&format!("dntls names list: {e}")))?;
     Ok(Json(serde_json::json!({
-        "names": names.iter().map(|row| serde_json::json!({
-            "pubkey": row.pubkey,
-            "fqdn": row.fqdn,
-        })).collect::<Vec<_>>(),
+        "names": names.iter().map(name_entry_json).collect::<Vec<_>>(),
     })))
+}
+
+fn name_entry_json(row: &buzz_db::dntls::DntlsApplication) -> Value {
+    serde_json::json!({
+        "pubkey": row.pubkey,
+        "fqdn": row.fqdn,
+        "approved_at": row.approved_at.map(|ts| ts.timestamp()).unwrap_or(0),
+    })
 }
 
 #[cfg(test)]
@@ -725,6 +730,23 @@ mod tests {
             .await
             .expect("read response body");
         serde_json::from_slice(&bytes).expect("response JSON")
+    }
+
+    #[test]
+    fn names_entry_includes_approved_at_unix_seconds() {
+        let approved_at =
+            chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("unix seconds");
+        let json = name_entry_json(&buzz_db::dntls::DntlsApplication {
+            pubkey: "ab".repeat(32),
+            fqdn: "alice.example".to_string(),
+            status: "approved".to_string(),
+            created_at: approved_at,
+            approved_at: Some(approved_at),
+            approved_by: Some("cd".repeat(32)),
+        });
+        assert_eq!(json["fqdn"], "alice.example");
+        assert_eq!(json["approved_at"], 1_700_000_000);
+        assert_eq!(json["pubkey"], "ab".repeat(32));
     }
 
     #[test]
