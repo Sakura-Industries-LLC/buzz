@@ -622,6 +622,30 @@ CREATE TABLE relay_invites (
 
 CREATE INDEX relay_invites_expires_at_idx ON relay_invites (expires_at);
 
+-- ── DNTLS join-proof applications ─────────────────────────────────────────────
+-- Conformance: community-scoped pending/approved pubkey→fqdn mappings.
+-- PK (community_id, pubkey) and UNIQUE (community_id, fqdn) both lead with
+-- community_id. First-bound-wins for a verified name inside one tenant.
+
+CREATE TABLE dntls_applications (
+    community_id UUID        NOT NULL REFERENCES communities(id),
+    pubkey       TEXT        NOT NULL,
+    fqdn         TEXT        NOT NULL CHECK (length(btrim(fqdn)) > 0 AND length(fqdn) <= 255),
+    status       TEXT        NOT NULL CHECK (status IN ('pending', 'approved')),
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    approved_at  TIMESTAMPTZ,
+    approved_by  TEXT,
+    PRIMARY KEY (community_id, pubkey),
+    UNIQUE (community_id, fqdn),
+    CHECK (
+        (status = 'pending' AND approved_at IS NULL AND approved_by IS NULL)
+        OR (status = 'approved' AND approved_at IS NOT NULL)
+    )
+);
+
+CREATE INDEX dntls_applications_status_idx
+    ON dntls_applications (community_id, status, created_at);
+
 -- ── Archived identities (NIP-IA) ──────────────────────────────────────────────
 -- Conformance: archive cannot hide a key in another community. PK scoped.
 
@@ -1749,6 +1773,7 @@ SELECT attach_community_write_fence('push_wake_outbox');
 SELECT attach_community_write_fence('reactions');
 SELECT attach_community_write_fence('relay_invites');
 SELECT attach_community_write_fence('relay_members');
+SELECT attach_community_write_fence('dntls_applications');
 SELECT attach_community_write_fence('scheduled_workflow_fires');
 SELECT attach_community_write_fence('subscriptions');
 SELECT attach_community_write_fence('thread_metadata');

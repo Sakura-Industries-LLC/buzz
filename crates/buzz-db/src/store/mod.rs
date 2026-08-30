@@ -18,6 +18,8 @@ pub mod community;
 pub mod deletion;
 /// Direct message channel persistence.
 pub mod dm;
+/// DNTLS join-proof application persistence.
+pub mod dntls;
 /// Event storage and retrieval.
 pub mod event;
 /// Home feed queries.
