@@ -49,6 +49,7 @@ import { cn } from "@/shared/lib/cn";
 import { observeElementBlockSize } from "@/shared/layout/observeElementBlockSize";
 import { useMeasuredCssVariable } from "@/shared/layout/useMeasuredCssVariable";
 import { Badge } from "@/shared/ui/badge";
+import { DntlsVerifiedBadge } from "@/features/profile/ui/DntlsVerifiedBadge";
 
 export { AgentInstructionsFocusedView } from "@/features/profile/ui/UserProfilePanelAgentDetails";
 
@@ -66,6 +67,8 @@ export type ProfileSummaryViewProps = {
   channels: ProfileChannelLink[];
   channelsLoading: boolean;
   displayName: string;
+  dntlsApprovedAt?: number | null;
+  dntlsFqdn?: string | null;
   followMutation: ReturnType<typeof useFollowMutation>;
   canInstantiateAgent: boolean;
   agentInstruction: string | null;
@@ -142,6 +145,8 @@ export function ProfileSummaryView({
   channels,
   channelsLoading,
   displayName,
+  dntlsApprovedAt,
+  dntlsFqdn,
   followMutation,
   canInstantiateAgent,
   agentInstruction,
@@ -404,10 +409,13 @@ export function ProfileSummaryView({
       >
         <ProfileHero
           displayName={displayName}
+          dntlsApprovedAt={dntlsApprovedAt}
+          dntlsFqdn={dntlsFqdn}
           isBot={isBot}
           onEditAgent={canEditAgent ? handleEditAgent : undefined}
           presenceStatus={avatarStatus}
           profile={profile}
+          pubkey={pubkey}
           userStatus={userStatus}
         />
       </div>
@@ -599,20 +607,34 @@ export function ProfileSummaryView({
 
 function ProfileHero({
   displayName,
+  dntlsApprovedAt,
+  dntlsFqdn,
   isBot,
   onEditAgent,
   presenceStatus,
   profile,
+  pubkey,
   userStatus,
 }: {
   displayName: string;
+  dntlsApprovedAt?: number | null;
+  dntlsFqdn?: string | null;
   isBot: boolean;
   onEditAgent?: () => void;
   presenceStatus: "online" | "away" | "offline" | undefined;
   profile: ProfileSummaryViewProps["profile"];
+  pubkey: string | null;
   userStatus: ProfileSummaryViewProps["userStatus"];
 }) {
   const presenceDotClassName = isBot ? "h-4.5 w-4.5" : "h-3.5 w-3.5";
+  const dntlsBadge =
+    dntlsFqdn && pubkey ? (
+      <DntlsVerifiedBadge
+        approvedAt={dntlsApprovedAt}
+        fqdn={dntlsFqdn}
+        pubkey={pubkey}
+      />
+    ) : null;
   const botIndicator = isBot ? (
     <BotIdenticon
       className="shrink-0 rounded"
@@ -669,6 +691,7 @@ function ProfileHero({
               <span className="truncate text-xl font-semibold tracking-tight">
                 {displayName}
               </span>
+              {dntlsBadge}
               {botIndicator}
               <span
                 aria-hidden="true"
@@ -685,6 +708,7 @@ function ProfileHero({
             data-testid="user-profile-name-row"
           >
             <span className="truncate">{displayName}</span>
+            {dntlsBadge}
             {botIndicator}
           </h3>
         )}

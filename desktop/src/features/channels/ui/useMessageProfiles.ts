@@ -2,9 +2,11 @@ import * as React from "react";
 
 import {
   mergeCurrentProfileIntoLookup,
+  mergeVerifiedDntlsNames,
   profileLookupsEqual,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import { useDntlsNamesQuery } from "@/features/profile/useDntlsNames";
 import type {
   ChannelMember,
   ManagedAgent,
@@ -50,21 +52,27 @@ export function useMessageProfiles({
   profiles: UserProfileLookup | undefined;
   relayAgents: RelayAgent[];
 }): UserProfileLookup {
+  const dntlsNamesQuery = useDntlsNamesQuery();
+  const dntlsNames = dntlsNamesQuery.data;
   const raw = React.useMemo(() => {
     const base = mergeCurrentProfileIntoLookup(profiles, currentProfile) ?? {};
-    return mergeMemberAgentFlagsIntoProfiles(
-      mergeAgentNamesIntoProfiles(
-        base,
-        managedAgents,
-        relayAgents,
-        currentPubkey,
+    return mergeVerifiedDntlsNames(
+      mergeMemberAgentFlagsIntoProfiles(
+        mergeAgentNamesIntoProfiles(
+          base,
+          managedAgents,
+          relayAgents,
+          currentPubkey,
+        ),
+        channelMembers,
       ),
-      channelMembers,
+      dntlsNames ?? new Map(),
     );
   }, [
     channelMembers,
     currentProfile,
     currentPubkey,
+    dntlsNames,
     managedAgents,
     profiles,
     relayAgents,

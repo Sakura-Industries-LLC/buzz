@@ -125,6 +125,11 @@ export type UserProfileSummary = {
   nip05Handle: string | null;
   ownerPubkey: string | null;
   isAgent?: boolean;
+  /** Relay-attested DNTLS name for this pubkey, if any. Never derived from
+   * kind-0 / NIP-05. */
+  verifiedDntlsName?: string | null;
+  /** Unix seconds the relay recorded DNTLS approval, when verified. */
+  dntlsApprovedAt?: number | null;
 };
 
 export type UsersBatchResponse = {

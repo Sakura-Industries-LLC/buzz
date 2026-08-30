@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatOwnerLabel, profileLookupsEqual } from "./identity.ts";
+import {
+  formatOwnerLabel,
+  mergeVerifiedDntlsNames,
+  profileLookupsEqual,
+  resolveUserLabel,
+} from "./identity.ts";
 
 const OWNER_PUBKEY =
   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -62,6 +67,8 @@ test("profileLookupsEqual: a changed field is not equal", () => {
     "nip05Handle",
     "ownerPubkey",
     "isAgent",
+    "verifiedDntlsName",
+    "dntlsApprovedAt",
   ]) {
     assert.equal(
       profileLookupsEqual(
@@ -119,4 +126,99 @@ test("stabiliser: a real profile change swaps the reference (re-render fires)", 
   // ...and then re-stabilises around the new value.
   const held = stabilise({ p1: summary({ displayName: "Grace" }) });
   assert.equal(held, changed, "must re-stabilise around the new value");
+});
+
+const USER_PUBKEY =
+  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+test("resolveUserLabel: verified DNTLS name wins over displayName and nip05", () => {
+  assert.equal(
+    resolveUserLabel({
+      pubkey: USER_PUBKEY,
+      profiles: {
+        [USER_PUBKEY]: summary({
+          displayName: "Ada",
+          nip05Handle: "ada@x",
+          verifiedDntlsName: "alice.example",
+        }),
+      },
+    }),
+    "alice.example",
+  );
+});
+
+test("resolveUserLabel: unverified users keep existing label behavior", () => {
+  assert.equal(
+    resolveUserLabel({
+      pubkey: USER_PUBKEY,
+      fallbackName: "Channel Nick",
+      profiles: { [USER_PUBKEY]: summary() },
+    }),
+    "Ada",
+  );
+  assert.equal(
+    resolveUserLabel({
+      pubkey: USER_PUBKEY,
+      fallbackName: "Channel Nick",
+      profiles: { [USER_PUBKEY]: summary({ displayName: null }) },
+    }),
+    "ada@x",
+  );
+  assert.equal(
+    resolveUserLabel({
+      pubkey: USER_PUBKEY,
+      fallbackName: "Channel Nick",
+      profiles: {
+        [USER_PUBKEY]: summary({ displayName: null, nip05Handle: null }),
+      },
+    }),
+    "Channel Nick",
+  );
+});
+
+test("resolveUserLabel: You still wins for the current user", () => {
+  assert.equal(
+    resolveUserLabel({
+      pubkey: USER_PUBKEY,
+      currentPubkey: USER_PUBKEY,
+      profiles: {
+        [USER_PUBKEY]: summary({ verifiedDntlsName: "alice.example" }),
+      },
+    }),
+    "You",
+  );
+});
+
+test("resolveUserLabel: verified current user shows DNTLS name when preferring resolved self", () => {
+  assert.equal(
+    resolveUserLabel({
+      pubkey: USER_PUBKEY,
+      currentPubkey: USER_PUBKEY,
+      preferResolvedSelfLabel: true,
+      profiles: {
+        [USER_PUBKEY]: summary({
+          displayName: "Ada",
+          verifiedDntlsName: "alice.example",
+        }),
+      },
+    }),
+    "alice.example",
+  );
+});
+
+test("mergeVerifiedDntlsNames overlays attested names without changing unverified rows", () => {
+  const other =
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+  const merged = mergeVerifiedDntlsNames(
+    {
+      [USER_PUBKEY]: summary({ displayName: "Ada" }),
+      [other]: summary({ displayName: "Bea" }),
+    },
+    new Map([[USER_PUBKEY, { fqdn: "alice.example", approvedAt: 1700000000 }]]),
+  );
+  assert.equal(merged[USER_PUBKEY].verifiedDntlsName, "alice.example");
+  assert.equal(merged[USER_PUBKEY].dntlsApprovedAt, 1700000000);
+  assert.equal(merged[USER_PUBKEY].displayName, "Ada");
+  assert.equal(merged[other].verifiedDntlsName, undefined);
+  assert.equal(merged[other].displayName, "Bea");
 });

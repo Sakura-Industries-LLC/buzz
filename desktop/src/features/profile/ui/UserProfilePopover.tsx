@@ -6,6 +6,8 @@ import {
   useUserProfileQuery,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
+import { useDntlsNamesQuery } from "@/features/profile/useDntlsNames";
+import { DntlsVerifiedBadge } from "@/features/profile/ui/DntlsVerifiedBadge";
 import {
   useRelayAgentsQuery,
   useManagedAgentsQuery,
@@ -277,6 +279,7 @@ function UserProfilePopoverBody({
     { enabled: Boolean(ownerPubkey) },
   );
   const normalizedPubkey = normalizePubkey(pubkey);
+  const dntlsName = useDntlsNamesQuery().data?.get(normalizedPubkey);
   const isAgentByOaOwner = Boolean(
     usersBatchQuery.data?.profiles[normalizedPubkey]?.isAgent,
   );
@@ -292,7 +295,8 @@ function UserProfilePopoverBody({
       relayAgentsQuery.isPending ||
       managedAgentsQuery.isPending ||
       usersBatchQuery.isPending);
-  const displayName = profile?.displayName ?? truncatePubkey(pubkey);
+  const displayName =
+    dntlsName?.fqdn?.trim() || profile?.displayName || truncatePubkey(pubkey);
   // Owner signal mirrors UserProfilePanel: a declared NIP-OA owner whose agent
   // runs elsewhere holds no local seckey, so key custody (`isOwner`) alone
   // wrongly hides the affordance from them — and gating on bot-ness alone shows
@@ -390,6 +394,13 @@ function UserProfilePopoverBody({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
           <HoverPubkeyName displayName={displayName} pubkey={pubkey} />
+          {dntlsName?.fqdn ? (
+            <DntlsVerifiedBadge
+              approvedAt={dntlsName.approvedAt}
+              fqdn={dntlsName.fqdn}
+              pubkey={pubkey}
+            />
+          ) : null}
           {isBotProfile && botIdenticonValue ? (
             <BotIdenticon
               value={botIdenticonValue}

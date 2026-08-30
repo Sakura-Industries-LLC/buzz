@@ -16,6 +16,7 @@ import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment"
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { DntlsVerifiedBadge } from "@/features/profile/ui/DntlsVerifiedBadge";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
 import {
@@ -548,6 +549,19 @@ export const MessageRow = React.memo(
       <div className="flex shrink-0 items-start">{avatarNode}</div>
     );
 
+    const verifiedDntlsName = message.pubkey
+      ? profiles?.[normalizePubkey(message.pubkey)]?.verifiedDntlsName?.trim()
+      : undefined;
+    const dntlsBadge =
+      message.pubkey && verifiedDntlsName ? (
+        <DntlsVerifiedBadge
+          approvedAt={
+            profiles?.[normalizePubkey(message.pubkey)]?.dntlsApprovedAt
+          }
+          fqdn={verifiedDntlsName}
+          pubkey={message.pubkey}
+        />
+      ) : null;
     const authorNode = message.pubkey ? (
       <MessageAuthorText hoverUnderline>{message.author}</MessageAuthorText>
     ) : (
@@ -648,18 +662,21 @@ export const MessageRow = React.memo(
     const headerNode = isDisplayedAsContinuation ? null : (
       <MessageHeaderRow>
         {message.pubkey ? (
-          <UserProfilePopover
-            pubkey={message.pubkey}
-            role={profilePopoverRole}
-            botIdenticonValue={message.author}
-          >
-            <button
-              className="truncate rounded leading-message-author focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-              type="button"
+          <span className="inline-flex min-w-0 items-baseline gap-1">
+            <UserProfilePopover
+              pubkey={message.pubkey}
+              role={profilePopoverRole}
+              botIdenticonValue={message.author}
             >
-              {authorNode}
-            </button>
-          </UserProfilePopover>
+              <button
+                className="truncate rounded leading-message-author focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                type="button"
+              >
+                {authorNode}
+              </button>
+            </UserProfilePopover>
+            {dntlsBadge}
+          </span>
         ) : (
           authorNode
         )}

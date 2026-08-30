@@ -50,6 +50,7 @@ import {
 import { ownsAuthorAgent } from "@/features/profile/lib/identity";
 import { resolveProfileActivityAgent } from "@/features/profile/lib/profileActivityAgent";
 import { useCanonicalManagedAgentProfile } from "@/features/profile/lib/useCanonicalManagedAgentProfile";
+import { useDntlsNamesQuery } from "@/features/profile/useDntlsNames";
 import {
   AgentInstructionsFocusedView,
   ProfileSummaryView,
@@ -226,6 +227,9 @@ export function UserProfilePanel({
   );
   const effectivePubkey = managedAgent?.pubkey ?? pubkey ?? null;
   const pubkeyLower = effectivePubkey?.toLowerCase() ?? "";
+  const dntlsName = useDntlsNamesQuery().data?.get(
+    effectivePubkey ? normalizePubkey(effectivePubkey) : "",
+  );
 
   const profileQuery = useUserProfileQuery(effectivePubkey ?? undefined);
   const currentProfileQuery = useProfileQuery(currentPubkey !== undefined);
@@ -665,11 +669,13 @@ export function UserProfilePanel({
     [goChannel],
   );
 
-  const displayName = resolveProfileDisplayName({
-    persona: resolvedPersona,
-    profile,
-    pubkey: effectivePubkey,
-  });
+  const displayName =
+    dntlsName?.fqdn?.trim() ||
+    resolveProfileDisplayName({
+      persona: resolvedPersona,
+      profile,
+      pubkey: effectivePubkey,
+    });
   const ownerHandle = React.useMemo(() => {
     if (ownerPubkey) {
       const ownerProfile = ownerProfileQuery.data;
@@ -792,6 +798,8 @@ export function UserProfilePanel({
           channels={profileChannels}
           channelsLoading={channelsQuery.isLoading}
           displayName={displayName}
+          dntlsApprovedAt={dntlsName?.approvedAt}
+          dntlsFqdn={dntlsName?.fqdn ?? null}
           followMutation={followMutation}
           agentInstruction={agentInstruction}
           handleAgentPrimaryAction={handleAgentPrimaryAction}

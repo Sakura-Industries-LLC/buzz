@@ -41,7 +41,9 @@ export function profileLookupsEqual(
       prev.avatarUrl !== next.avatarUrl ||
       prev.nip05Handle !== next.nip05Handle ||
       prev.ownerPubkey !== next.ownerPubkey ||
-      prev.isAgent !== next.isAgent
+      prev.isAgent !== next.isAgent ||
+      prev.verifiedDntlsName !== next.verifiedDntlsName ||
+      prev.dntlsApprovedAt !== next.dntlsApprovedAt
     ) {
       return false;
     }
@@ -84,6 +86,12 @@ export function mergeCurrentProfileIntoLookup(
       isAgent: profiles?.[normalizePubkey(currentProfile.pubkey)]?.isAgent,
       ownerPubkey:
         profiles?.[normalizePubkey(currentProfile.pubkey)]?.ownerPubkey ?? null,
+      verifiedDntlsName:
+        profiles?.[normalizePubkey(currentProfile.pubkey)]?.verifiedDntlsName ??
+        null,
+      dntlsApprovedAt:
+        profiles?.[normalizePubkey(currentProfile.pubkey)]?.dntlsApprovedAt ??
+        null,
     },
   };
 }
@@ -113,6 +121,11 @@ export function resolveUserLabel(input: {
   }
 
   const profile = getResolvedProfile(pubkey, profiles);
+  const verifiedDntlsName = profile?.verifiedDntlsName?.trim();
+  if (verifiedDntlsName) {
+    return verifiedDntlsName;
+  }
+
   const displayName = profile?.displayName?.trim();
   if (displayName) {
     return displayName;
@@ -190,4 +203,30 @@ export function formatOwnerLabel(
     owner?.nip05Handle?.trim() ||
     truncatePubkey(ownerPubkey)
   );
+}
+
+/**
+ * Overlay relay-attested DNTLS names onto a profile lookup. Unverified
+ * pubkeys keep their existing summary fields unchanged.
+ */
+export function mergeVerifiedDntlsNames(
+  profiles: UserProfileLookup | undefined,
+  names: ReadonlyMap<string, { fqdn: string; approvedAt: number }>,
+): UserProfileLookup {
+  const merged: UserProfileLookup = { ...(profiles ?? {}) };
+  for (const [pubkey, name] of names) {
+    const key = normalizePubkey(pubkey);
+    const existing = merged[key];
+    merged[key] = {
+      displayName: existing?.displayName ?? null,
+      name: existing?.name ?? null,
+      avatarUrl: existing?.avatarUrl ?? null,
+      nip05Handle: existing?.nip05Handle ?? null,
+      ownerPubkey: existing?.ownerPubkey ?? null,
+      isAgent: existing?.isAgent,
+      verifiedDntlsName: name.fqdn,
+      dntlsApprovedAt: name.approvedAt,
+    };
+  }
+  return merged;
 }
