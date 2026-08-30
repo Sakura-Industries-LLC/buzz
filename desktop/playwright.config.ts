@@ -175,6 +175,7 @@ export default defineConfig({
         "**/onboarding.spec.ts",
         "**/stream.spec.ts",
         "**/integration.spec.ts",
+        "**/dntls-badge.spec.ts",
         "**/dm-double-notification.spec.ts",
         "**/profile.spec.ts",
         "**/sidebar.spec.ts",

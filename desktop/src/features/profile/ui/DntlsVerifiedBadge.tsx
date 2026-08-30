@@ -76,7 +76,10 @@ export function DntlsVerifiedBadge({
         sideOffset={8}
       >
         <div className="flex flex-col gap-3">
-          <p className="truncate font-mono text-sm font-semibold leading-5">
+          <p
+            className="truncate font-mono text-sm font-semibold leading-5"
+            data-testid="dntls-proof-identifier"
+          >
             {proof.identifier}
           </p>
           <p className="text-xs leading-5 text-muted-foreground">
