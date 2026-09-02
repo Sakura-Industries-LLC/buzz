@@ -6,6 +6,7 @@ mod builderlab;
 mod channel_head_cache;
 mod commands;
 mod deep_link;
+mod dntls_connector;
 mod egress_guard;
 mod event_sync;
 mod events;
@@ -225,6 +226,7 @@ pub fn run() {
         .manage(PendingCommunityDeepLinks::default())
         .manage(PendingNavigationDeepLinks::default())
         .manage(PendingEntityDeepLinks::default())
+        .manage(dntls_connector::DntlsConnectors::default())
         .manage(BuilderlabSession::default())
         .manage(BuilderlabLogin::default())
         .manage(commands::pairing::PairingHandle::new())
@@ -533,6 +535,7 @@ pub fn run() {
             clear_pending_navigation_deep_links,
             take_pending_entity_deep_link,
             acknowledge_pending_entity_deep_link,
+            dntls_connector::start_dntls_connector,
             start_builderlab_login,
             cancel_builderlab_login,
             get_builderlab_auth,

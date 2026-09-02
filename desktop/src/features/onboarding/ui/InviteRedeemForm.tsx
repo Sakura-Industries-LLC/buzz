@@ -13,6 +13,10 @@ import {
   type JoinPolicy,
 } from "@/shared/api/invites";
 import { normalizeRelayUrl } from "@/features/communities/relayProbe";
+import {
+  dntlsCommunityName,
+  startDntlsConnector,
+} from "@/features/communities/dntlsConnector";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
@@ -54,7 +58,7 @@ type InviteRedeemFormProps = {
   initialValue?: string;
   isRedeeming: boolean;
   onCancel: () => void;
-  onConnect?: (relayWsUrl: string) => void;
+  onConnect?: (relayWsUrl: string, dntlsName?: string) => void;
   onRedeem: (relayWsUrl: string, code: string, policyReceipt?: string) => void;
   placeholder?: string;
   variant?: "add-community" | "default" | "onboarding-spotlight";
@@ -87,17 +91,24 @@ export function InviteRedeemForm({
   const [isLoadingPolicy, setIsLoadingPolicy] = React.useState(false);
   const shouldReduceMotion = useReducedMotion();
 
+  const isAddCommunity = variant === "add-community";
   const parsed = React.useMemo(
     () => parseInviteInput(inviteInput),
     [inviteInput],
   );
+  const dntlsName = React.useMemo(
+    () =>
+      onConnect && isAddCommunity ? dntlsCommunityName(inviteInput) : null,
+    [inviteInput, isAddCommunity, onConnect],
+  );
   const normalizedRelayUrl = React.useMemo(
     () =>
       onConnect &&
-      (!parsed || (variant === "add-community" && !hasInviteRelay(parsed)))
+      dntlsName === null &&
+      (!parsed || (isAddCommunity && !hasInviteRelay(parsed)))
         ? normalizeRelayUrl(inviteInput)
         : null,
-    [inviteInput, onConnect, parsed, variant],
+    [dntlsName, inviteInput, isAddCommunity, onConnect, parsed],
   );
   const parsedInvite: ParsedInvite | null = normalizedRelayUrl ? null : parsed;
   const isBareCode = parsedInvite !== null && !hasInviteRelay(parsedInvite);
@@ -138,36 +149,39 @@ export function InviteRedeemForm({
   }, [bareCodeRelayUrl, normalizedRelayUrl, parsedInvite]);
 
   const canSubmit =
+    dntlsName !== null ||
     (parsedInvite !== null &&
       ("relayWsUrl" in parsedInvite ||
         (isBareCode && bareCodeRelayUrl.trim().length > 0))) ||
     normalizedRelayUrl !== null;
   const isOnboardingSpotlight = variant === "onboarding-spotlight";
-  const isAddCommunity = variant === "add-community";
   const showInvalidInviteTip =
     isOnboardingSpotlight && inviteInput.trim().length > 0 && !canSubmit;
 
   const handleSubmit = React.useCallback(
     async (event: React.FormEvent) => {
       event.preventDefault();
-      if (normalizedRelayUrl) {
+      if (dntlsName || normalizedRelayUrl) {
         setPolicyError(null);
         setIsLoadingPolicy(true);
         try {
-          const policy = await getJoinPolicy(normalizedRelayUrl, "native");
+          const ready = dntlsName ? await startDntlsConnector(dntlsName) : null;
+          const relayWsUrl = ready?.relayUrl ?? normalizedRelayUrl;
+          if (!relayWsUrl) return;
+          const policy = await getJoinPolicy(relayWsUrl, "native");
           if (!policy) {
-            onConnect?.(normalizedRelayUrl);
+            onConnect?.(relayWsUrl, ready?.community);
             return;
           }
 
           if (
             !joinPolicy ||
             joinPolicy.version !== policy.version ||
-            policyTarget?.relayWsUrl !== normalizedRelayUrl ||
+            policyTarget?.relayWsUrl !== relayWsUrl ||
             policyTarget.code !== undefined
           ) {
             setJoinPolicy(policy);
-            setPolicyTarget({ relayWsUrl: normalizedRelayUrl });
+            setPolicyTarget({ relayWsUrl });
             setAgeConfirmed(false);
             setAgreementConfirmed(false);
             return;
@@ -185,7 +199,7 @@ export function InviteRedeemForm({
             return;
           }
 
-          onConnect?.(normalizedRelayUrl);
+          onConnect?.(relayWsUrl, ready?.community);
         } catch (policyFetchError) {
           setPolicyError(inviteErrorMessage(policyFetchError));
         } finally {
@@ -250,6 +264,7 @@ export function InviteRedeemForm({
     [
       ageConfirmed,
       agreementConfirmed,
+      dntlsName,
       bareCodeRelayUrl,
       joinPolicy,
       normalizedRelayUrl,
@@ -399,7 +414,7 @@ export function InviteRedeemForm({
             htmlFor="invite-input"
           >
             {isAddCommunity
-              ? "Community URL or invite link"
+              ? "Community URL, DNTLS name, or invite link"
               : "Invite link or code"}
           </label>
           <Input
@@ -417,7 +432,7 @@ export function InviteRedeemForm({
             onChange={handleInviteInputChange}
             placeholder={
               isAddCommunity
-                ? "https://community.example.com or paste an invite link"
+                ? "community.example.com, name.dntls, or an invite link"
                 : "https://relay.example.com/invite/abc123 or paste a code"
             }
             spellCheck={false}
@@ -437,7 +452,7 @@ export function InviteRedeemForm({
           )}
           data-testid="invalid-invite-tip"
         >
-          Please enter a valid invite link or community URL
+          Please enter a valid invite link, community URL, or DNTLS name
         </p>
       ) : null}
 

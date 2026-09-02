@@ -47,12 +47,22 @@ test("invite onboarding starts at claim and normalizes its relay", () => {
   assert.equal(persisted?.relayUrl, transaction.relayUrl);
 });
 
-test("non-invite onboarding starts at connection", () => {
+test("non-invite DNTLS onboarding persists its authority", () => {
+  const storage = createMemoryStorage();
   const transaction = startCommunityOnboarding(
-    { source: "add-community", relayUrl: "wss://relay.example" },
-    createMemoryStorage(),
+    {
+      source: "add-community",
+      relayUrl: "ws://127.0.0.1:4100",
+      dntlsName: "community.example.dntls",
+    },
+    storage,
   );
   assert.equal(transaction.stage, "connecting");
+  assert.equal(transaction.dntlsName, "community.example.dntls");
+  assert.equal(
+    loadCommunityOnboardingTransaction(storage)?.dntlsName,
+    "community.example.dntls",
+  );
 });
 
 test("same-relay ingress resumes rather than replacing progress", () => {

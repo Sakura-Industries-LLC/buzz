@@ -2,11 +2,7 @@ import { BadgeCheck } from "lucide-react";
 
 import { safeNpub } from "@/shared/lib/nostrUtils";
 import { cn } from "@/shared/lib/cn";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/shared/ui/popover";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 
 export type DntlsVerifiedBadgeProps = {
   approvedAt?: number | null;
@@ -63,6 +59,7 @@ export function DntlsVerifiedBadge({
           onClick={(event) => {
             event.stopPropagation();
           }}
+          type="button"
         >
           <BadgeCheck aria-hidden="true" className="h-3.5 w-3.5" />
         </button>

@@ -734,8 +734,7 @@ mod tests {
 
     #[test]
     fn names_entry_includes_approved_at_unix_seconds() {
-        let approved_at =
-            chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("unix seconds");
+        let approved_at = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("unix seconds");
         let json = name_entry_json(&buzz_db::dntls::DntlsApplication {
             pubkey: "ab".repeat(32),
             fqdn: "alice.example".to_string(),

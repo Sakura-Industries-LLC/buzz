@@ -43,23 +43,31 @@ const PUBKEY = "aa".repeat(32);
 test("fetchDntlsNames maps pubkey to fqdn and approvedAt", async () => {
   setupTauriStubs("https://relay.example");
   try {
-    await withFetch(async (url, init) => {
-      assert.equal(url, "https://relay.example/api/dntls/names");
-      assert.equal(init.method ?? "GET", "GET");
-      assert.match(init.headers.Authorization, /^Nostr /);
-      return new Response(
-        JSON.stringify({
-          names: [
-            { pubkey: PUBKEY.toUpperCase(), fqdn: "alice.example", approved_at: 1700000000 },
-          ],
-        }),
-      );
-    }, async () => {
-      const names = await fetchDntlsNames();
-      assert.deepEqual([...names.entries()], [
-        [PUBKEY, { fqdn: "alice.example", approvedAt: 1700000000 }],
-      ]);
-    });
+    await withFetch(
+      async (url, init) => {
+        assert.equal(url, "https://relay.example/api/dntls/names");
+        assert.equal(init.method ?? "GET", "GET");
+        assert.match(init.headers.Authorization, /^Nostr /);
+        return new Response(
+          JSON.stringify({
+            names: [
+              {
+                pubkey: PUBKEY.toUpperCase(),
+                fqdn: "alice.example",
+                approved_at: 1700000000,
+              },
+            ],
+          }),
+        );
+      },
+      async () => {
+        const names = await fetchDntlsNames();
+        assert.deepEqual(
+          [...names.entries()],
+          [[PUBKEY, { fqdn: "alice.example", approvedAt: 1700000000 }]],
+        );
+      },
+    );
   } finally {
     teardownTauriStubs();
   }
@@ -68,10 +76,13 @@ test("fetchDntlsNames maps pubkey to fqdn and approvedAt", async () => {
 test("fetchDntlsNames fail-safe returns empty map on 404", async () => {
   setupTauriStubs("https://relay.example");
   try {
-    await withFetch(async () => new Response("{}", { status: 404 }), async () => {
-      const names = await fetchDntlsNames();
-      assert.equal(names.size, 0);
-    });
+    await withFetch(
+      async () => new Response("{}", { status: 404 }),
+      async () => {
+        const names = await fetchDntlsNames();
+        assert.equal(names.size, 0);
+      },
+    );
   } finally {
     teardownTauriStubs();
   }
@@ -80,12 +91,15 @@ test("fetchDntlsNames fail-safe returns empty map on 404", async () => {
 test("fetchDntlsNames fail-safe returns empty map on fetch failure", async () => {
   setupTauriStubs("https://relay.example");
   try {
-    await withFetch(async () => {
-      throw new Error("network down");
-    }, async () => {
-      const names = await fetchDntlsNames();
-      assert.equal(names.size, 0);
-    });
+    await withFetch(
+      async () => {
+        throw new Error("network down");
+      },
+      async () => {
+        const names = await fetchDntlsNames();
+        assert.equal(names.size, 0);
+      },
+    );
   } finally {
     teardownTauriStubs();
   }

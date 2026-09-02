@@ -11531,6 +11531,20 @@ export function maybeInstallE2eTauriMocks() {
     window.__BUZZ_E2E_COMMAND_LOG__?.push({ command, payload });
 
     switch (command) {
+      case "start_dntls_connector": {
+        if (
+          !payload ||
+          typeof payload !== "object" ||
+          !("community" in payload) ||
+          typeof payload.community !== "string"
+        ) {
+          throw new Error("Missing DNTLS community name.");
+        }
+        return {
+          community: payload.community,
+          relay_url: getRelayWsUrl(activeConfig),
+        };
+      }
       case "get_huddle_state": {
         const snapshot = mockHuddle ? structuredClone(mockHuddle.state) : null;
         const delayMs = activeConfig?.mock?.huddleStateReadDelayMs ?? 0;
