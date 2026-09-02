@@ -38,10 +38,24 @@ name: Docker image
 # `flavor.latest=auto` (its default) emits :latest only for non-prerelease
 # semver, so relay-v0.3.0-rc.1 publishes :0.3.0-rc.1 without moving :latest,
 # and main pushes (no semver tag) never produce :latest.
+#
+# Fork note (Sakura-Industries-LLC/buzz): this repository publishes the relay
+# from its own `dntls` branch into its own namespace. `GHCR_IMAGE` is set as a
+# repository variable, so IMAGE_NAME below resolves to
+# ghcr.io/sakura-industries-llc/buzz; pushes to `dntls` publish :dntls +
+# :sha-<7> (and the matching :debug-* pair), while `relay-v*` tags keep the
+# upstream semver behavior. Three jobs are gated on
+# `github.repository == 'block/buzz'` because they depend on infrastructure
+# only upstream has: the same-SHA CI qualification gate (ci.yml does not run
+# on this fork's branches) and the two push-gateway jobs (they publish to the
+# hardcoded ghcr.io/block namespace, which this fork's GITHUB_TOKEN cannot
+# write). Only linux/amd64 is built here: the self-host appliance is amd64,
+# and a failing arm64 leg would fail the whole `build` job and block manifest
+# publication.
 
 on:
   push:
-    branches: [main]
+    branches: [main, dntls]
     tags: ["relay-v[0-9]*"]
   pull_request:
     paths:
@@ -86,7 +100,8 @@ jobs:
   build:
     name: Build (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    # 60 upstream; this fork's registry build cache starts cold.
+    timeout-minutes: 120
     permissions:
       contents: read
       packages: write    # push to GHCR
@@ -99,9 +114,7 @@ jobs:
           - platform: linux/amd64
             runner: ubuntu-24.04
             arch: amd64
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            arch: arm64
+          # arm64 leg dropped on this fork; see the fork note above.
 
     steps:
       - name: Checkout
@@ -236,7 +249,9 @@ jobs:
 
   qualify:
     name: Qualify relay image source
-    if: github.event_name != 'pull_request'
+    # Upstream-only: requires a successful same-SHA ci.yml push run on
+    # main/release, which this fork's branches never produce.
+    if: github.event_name != 'pull_request' && github.repository == 'block/buzz'
     runs-on: ubuntu-24.04
     timeout-minutes: 70
     permissions:
@@ -311,7 +326,14 @@ jobs:
 
   merge:
     name: Merge ${{ matrix.variant }} multi-arch manifest
-    if: github.event_name != 'pull_request'
+    # `qualify` is skipped on forks, and a skipped need would otherwise skip
+    # this job too, so gate on the results explicitly. A *failed*
+    # qualification still blocks publication, exactly as upstream.
+    if: >-
+      ${{ !cancelled()
+      && github.event_name != 'pull_request'
+      && needs.build.result == 'success'
+      && (needs.qualify.result == 'success' || needs.qualify.result == 'skipped') }}
     runs-on: ubuntu-24.04
     needs: [build, qualify]
     timeout-minutes: 15
@@ -378,7 +400,7 @@ jobs:
         env:
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
           META_TAGS: ${{ steps.meta.outputs.tags }}
-          SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
+          SOURCE_SHA: ${{ needs.qualify.outputs.source_sha || github.sha }}
           CI_RUN_ID: ${{ needs.qualify.outputs.ci_run_id }}
           CI_RUN_ATTEMPT: ${{ needs.qualify.outputs.ci_run_attempt }}
           CHART_VERSION: ${{ needs.qualify.outputs.chart_version }}
@@ -399,11 +421,17 @@ jobs:
           annotations=(
             --annotation "index:org.opencontainers.image.revision=${SOURCE_SHA}"
             --annotation "index:xyz.block.buzz.build.id=github-actions:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
-            --annotation "index:xyz.block.buzz.qualification.ci-run-id=${CI_RUN_ID}"
-            --annotation "index:xyz.block.buzz.qualification.ci-run-attempt=${CI_RUN_ATTEMPT}"
-            --annotation "index:xyz.block.buzz.qualification.ci-conclusion=success"
-            --annotation "index:xyz.block.buzz.helm-chart.version=${CHART_VERSION}"
           )
+          # Qualification annotations exist only when the upstream same-SHA CI
+          # gate ran (see the `qualify` job's repository guard).
+          if [ -n "$CI_RUN_ID" ]; then
+            annotations+=(
+              --annotation "index:xyz.block.buzz.qualification.ci-run-id=${CI_RUN_ID}"
+              --annotation "index:xyz.block.buzz.qualification.ci-run-attempt=${CI_RUN_ATTEMPT}"
+              --annotation "index:xyz.block.buzz.qualification.ci-conclusion=success"
+              --annotation "index:xyz.block.buzz.helm-chart.version=${CHART_VERSION}"
+            )
+          fi
           docker buildx imagetools create "${tags[@]}" "${annotations[@]}" "${digests[@]}"
 
           # Capture the merged manifest digest for the attestation step.
@@ -422,7 +450,7 @@ jobs:
           push-to-registry: true
 
       - name: Create deployment eligibility predicate
-        if: matrix.variant == 'release'
+        if: matrix.variant == 'release' && needs.qualify.result == 'success'
         env:
           SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
           CI_RUN_ID: ${{ needs.qualify.outputs.ci_run_id }}
@@ -447,7 +475,7 @@ jobs:
             >/tmp/deployment-eligibility.json
 
       - name: Attest deployment eligibility
-        if: matrix.variant == 'release'
+        if: matrix.variant == 'release' && needs.qualify.result == 'success'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4.2.2
         with:
           subject-name: ${{ env.IMAGE_NAME }}
@@ -462,7 +490,7 @@ jobs:
           VARIANT: ${{ matrix.variant }}
           MERGED_DIGEST: ${{ steps.manifest.outputs.digest }}
           META_TAGS: ${{ steps.meta.outputs.tags }}
-          SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
+          SOURCE_SHA: ${{ needs.qualify.outputs.source_sha || github.sha }}
           CI_RUN_URL: ${{ needs.qualify.outputs.ci_run_url }}
           CHART_VERSION: ${{ needs.qualify.outputs.chart_version }}
         run: |
@@ -471,8 +499,10 @@ jobs:
             echo
             echo "**Digest:** \`${MERGED_DIGEST}\`"
             echo "**Source:** \`${SOURCE_SHA}\`"
-            echo "**Compatible Buzz chart:** \`${CHART_VERSION}\`"
-            echo "**Qualifying CI:** ${CI_RUN_URL} (success)"
+            if [[ -n "$CI_RUN_URL" ]]; then
+              echo "**Compatible Buzz chart:** \`${CHART_VERSION}\`"
+              echo "**Qualifying CI:** ${CI_RUN_URL} (success)"
+            fi
             echo
             echo "**Tags:**"
             echo '```'
@@ -481,19 +511,21 @@ jobs:
             echo
             echo "Verify provenance:"
             echo '```'
-            echo "gh attestation verify oci://${IMAGE_NAME}@${MERGED_DIGEST} --owner block"
+            echo "gh attestation verify oci://${IMAGE_NAME}@${MERGED_DIGEST} --owner ${GITHUB_REPOSITORY_OWNER}"
             echo '```'
-            if [[ "$VARIANT" == "release" ]]; then
+            if [[ "$VARIANT" == "release" && -n "$CI_RUN_URL" ]]; then
               echo
               echo "Verify deployment eligibility:"
               echo '```'
-              echo "gh attestation verify oci://${IMAGE_NAME}@${MERGED_DIGEST} --repo block/buzz --signer-workflow block/buzz/.github/workflows/docker.yml --predicate-type https://buzz.block.xyz/attestations/deployment-eligibility/v1 --source-digest ${SOURCE_SHA}"
+              echo "gh attestation verify oci://${IMAGE_NAME}@${MERGED_DIGEST} --repo ${GITHUB_REPOSITORY} --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/docker.yml --predicate-type https://buzz.block.xyz/attestations/deployment-eligibility/v1 --source-digest ${SOURCE_SHA}"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
   push-gateway-build:
     name: Build public push gateway (${{ matrix.platform }})
+    # Upstream-only: publishes to the hardcoded ghcr.io/block namespace.
+    if: github.repository == 'block/buzz'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
@@ -571,7 +603,7 @@ jobs:
 
   push-gateway-merge:
     name: Publish public push gateway image
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.repository == 'block/buzz'
     runs-on: ubuntu-24.04
     needs: push-gateway-build
     timeout-minutes: 15
