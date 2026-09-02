@@ -84,6 +84,11 @@ pub struct ConnectionState {
     pub backpressure_count: Arc<AtomicU8>,
     /// Configurable slow-client grace limit (from `Config::slow_client_grace_limit`).
     pub grace_limit: u8,
+    /// Gateway-verified DNTLS name from `X-DNTLS-Name` on the upgrade request.
+    ///
+    /// `None` when admission is off, the header is missing, or the value is
+    /// empty. Set once at handshake and read at NIP-42 AUTH.
+    pub dntls_name: Option<String>,
 }
 
 impl ConnectionState {
@@ -127,6 +132,7 @@ pub async fn handle_connection(
     state: Arc<AppState>,
     addr: SocketAddr,
     tenant: TenantContext,
+    dntls_name: Option<String>,
 ) {
     let conn_id = Uuid::new_v4();
     let cancel = CancellationToken::new();
@@ -141,7 +147,17 @@ pub async fn handle_connection(
         community_id,
         control,
         move || async move { check_state.db.is_community_active(community_id).await },
-        move |control| handle_active_connection(socket, run_state, addr, tenant, conn_id, control),
+        move |control| {
+            handle_active_connection(
+                socket,
+                run_state,
+                addr,
+                tenant,
+                dntls_name,
+                conn_id,
+                control,
+            )
+        },
     )
     .await;
 }
@@ -151,6 +167,7 @@ async fn handle_active_connection(
     state: Arc<AppState>,
     addr: SocketAddr,
     tenant: TenantContext,
+    dntls_name: Option<String>,
     conn_id: Uuid,
     control: CommunityConnectionControl,
 ) {
@@ -192,6 +209,7 @@ async fn handle_active_connection(
         cancel: cancel.clone(),
         backpressure_count: Arc::clone(&backpressure_count),
         grace_limit: state.config.slow_client_grace_limit,
+        dntls_name,
     });
 
     info!(conn_id = %conn_id, addr = %addr, "WebSocket connection established");

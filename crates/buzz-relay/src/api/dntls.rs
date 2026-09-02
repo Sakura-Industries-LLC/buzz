@@ -1,165 +1,57 @@
-//! DNTLS join-proof admission HTTP API.
+//! DNTLS verified-name admission HTTP API.
 //!
-//! Routes (all NIP-98 signed, outside the Nostr event data plane):
+//! The gateway terminates DNTLS mutual TLS and forwards the verified name in
+//! `X-DNTLS-Name`. The relay trusts that header when
+//! [`crate::config::DntlsAdmission`] is not `Off` and binds `pubkey ↔ fqdn` at
+//! NIP-42 AUTH. Operators must bind the relay to loopback behind the gateway.
 //!
-//! - `POST /api/dntls/join/challenge` — mint a single-use challenge. Caller is
-//!   the joining pubkey; **exempt from the relay-membership gate**.
-//! - `POST /api/dntls/join` — consume the challenge and verify a join proof
-//!   against the operator-configured introducer. Membership-exempt; rate-limited
-//!   per (community, pubkey) like invite claims.
+//! HTTP routes (all NIP-98 signed, outside the Nostr event data plane):
+//!
 //! - `GET /api/dntls/pending` — list pending applications. Owner/admin only.
 //! - `POST /api/dntls/approve` — admit a pending pubkey through the same
 //!   membership path invite claims use, and retain the verified-name mapping.
 //! - `POST /api/dntls/reject` — delete a pending application. Owner/admin only.
 //! - `GET /api/dntls/names` — list approved pubkey→fqdn mappings. Any member.
 //!
-//! Feature-gated by `BUZZ_DNTLS_INTRODUCER_URL`. When unset, every route
+//! Feature-gated by `BUZZ_DNTLS_ADMISSION`. When `off` (default), every route
 //! returns 404 before authentication.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
     response::Json,
 };
-use base64::Engine;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::config::DntlsAdmission;
+use crate::connection::ConnectionState;
 use crate::handlers::side_effects::{publish_nip43_member_added, publish_nip43_membership_list};
+use crate::protocol::RelayMessage;
 use crate::state::AppState;
+use buzz_core::tenant::TenantContext;
 
-use super::{api_error, bridge, internal_error, relay_members};
-
-/// Challenge lifetime advertised to clients and used as the moka TTL.
-pub(crate) const CHALLENGE_TTL: Duration = Duration::from_secs(300);
-/// Maximum distinct (community, pubkey) challenges retained process-locally.
-pub(crate) const CHALLENGE_CACHE_CAPACITY: u64 = 10_000;
-/// Max join attempts per pubkey per window — same bound as invite claims.
-const JOIN_RATE_LIMIT: u32 = 10;
-
-const CHALLENGE_PATH: &str = "/api/dntls/join/challenge";
-const JOIN_PATH: &str = "/api/dntls/join";
 const PENDING_PATH: &str = "/api/dntls/pending";
 const APPROVE_PATH: &str = "/api/dntls/approve";
 const REJECT_PATH: &str = "/api/dntls/reject";
 const NAMES_PATH: &str = "/api/dntls/names";
 
-/// Outcome of asking the DNTLS introducer to verify a join proof.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IntroducerOutcome {
-    /// HTTP 200 with a verified proof.
-    Verified,
-    /// Authoritative refusal (`403 join_proof_rejected`).
-    Rejected,
-    /// Backend unavailable, transport error, or any non-200/403/503.
-    Unavailable,
-}
+/// NOTICE sent when a verified name is already bound to another pubkey.
+pub(crate) const NAME_ALREADY_CLAIMED_NOTICE: &str = "dntls: name already claimed";
 
-/// Client used to verify join proofs against a DNTLS introducer.
-///
-/// Production binds [`HttpIntroducer`]. Tests inject a stub so the join
-/// handler can be exercised without a live sidecar.
-#[async_trait::async_trait]
-pub trait IntroducerClient: Send + Sync {
-    /// Verify a join proof at `{introducer_url}/v1/verify-join`.
-    async fn verify_join(
-        &self,
-        introducer_url: &str,
-        fqdn: &str,
-        nostr_public_key: &str,
-        challenge: &str,
-        service_signature: &str,
-    ) -> IntroducerOutcome;
-}
+const DNTLS_NAME_HEADER: &str = "x-dntls-name";
+const MAX_FQDN_LEN: usize = 255;
 
-/// HTTP client for `POST {introducer_url}/v1/verify-join`.
-pub struct HttpIntroducer {
-    client: reqwest::Client,
-}
-
-impl HttpIntroducer {
-    /// Build the shared introducer client.
-    pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .expect("static DNTLS introducer HTTP client configuration"),
-        }
-    }
-}
-
-impl Default for HttpIntroducer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait::async_trait]
-impl IntroducerClient for HttpIntroducer {
-    async fn verify_join(
-        &self,
-        introducer_url: &str,
-        fqdn: &str,
-        nostr_public_key: &str,
-        challenge: &str,
-        service_signature: &str,
-    ) -> IntroducerOutcome {
-        let url = format!("{introducer_url}/v1/verify-join");
-        let response = match self
-            .client
-            .post(&url)
-            .json(&serde_json::json!({
-                "fqdn": fqdn,
-                "nostr_public_key": nostr_public_key,
-                "challenge": challenge,
-                "service_signature": service_signature,
-            }))
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                tracing::warn!(
-                    timeout = error.is_timeout(),
-                    "DNTLS introducer request failed"
-                );
-                return IntroducerOutcome::Unavailable;
-            }
-        };
-
-        map_introducer_response(response.status().as_u16(), response.json().await.ok())
-    }
-}
-
-/// Map an introducer HTTP status + optional JSON body onto the join contract.
-pub(crate) fn map_introducer_response(status: u16, body: Option<Value>) -> IntroducerOutcome {
-    match status {
-        200 => {
-            if body
-                .as_ref()
-                .and_then(|value| value.get("verified"))
-                .and_then(Value::as_bool)
-                == Some(true)
-            {
-                IntroducerOutcome::Verified
-            } else {
-                IntroducerOutcome::Unavailable
-            }
-        }
-        403 => IntroducerOutcome::Rejected,
-        _ => IntroducerOutcome::Unavailable,
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct JoinRequest {
-    fqdn: String,
-    service_signature: String,
+/// Outcome of applying a gateway-verified name at NIP-42 AUTH.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdmissionEffect {
+    /// Mapping written or refreshed; AUTH should continue.
+    Applied,
+    /// The name is already bound to a different pubkey. AUTH continues as an
+    /// ordinary (non-verified) member if membership allows.
+    NameClaimed,
 }
 
 #[derive(Debug, Deserialize)]
@@ -167,12 +59,35 @@ struct PubkeyRequest {
     pubkey: String,
 }
 
-fn require_configured(state: &AppState) -> Result<&str, (StatusCode, Json<Value>)> {
-    state
-        .config
-        .dntls_introducer_url
-        .as_deref()
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "dntls_not_configured"))
+fn require_configured(state: &AppState) -> Result<(), (StatusCode, Json<Value>)> {
+    match state.config.dntls_admission {
+        DntlsAdmission::Off => Err(api_error(
+            StatusCode::NOT_FOUND,
+            "dntls_not_configured",
+        )),
+        DntlsAdmission::Auto | DntlsAdmission::Approve => Ok(()),
+    }
+}
+
+/// Read `X-DNTLS-Name` from a WebSocket upgrade when admission is enabled.
+pub(crate) fn verified_name_from_upgrade(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Option<String> {
+    if state.config.dntls_admission == DntlsAdmission::Off {
+        return None;
+    }
+    verified_name_from_headers(headers)
+}
+
+/// Normalize a gateway-supplied DNTLS name header.
+pub(crate) fn verified_name_from_headers(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(DNTLS_NAME_HEADER)?.to_str().ok()?;
+    let fqdn = raw.trim().to_ascii_lowercase();
+    if fqdn.is_empty() || fqdn.len() > MAX_FQDN_LEN {
+        return None;
+    }
+    Some(fqdn)
 }
 
 async fn authenticate(
@@ -182,7 +97,7 @@ async fn authenticate(
     path: &str,
     body: &[u8],
     require_payload: bool,
-) -> Result<(buzz_core::TenantContext, nostr::PublicKey), (StatusCode, Json<Value>)> {
+) -> Result<(TenantContext, nostr::PublicKey), (StatusCode, Json<Value>)> {
     let raw_host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
@@ -196,8 +111,8 @@ async fn authenticate(
             )
         })?;
 
-    let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, path);
-    let (pubkey, event_id_bytes) = bridge::verify_bridge_auth_with_options(
+    let url = super::bridge::nip98_expected_url(&state.config.relay_url, &tenant, path);
+    let (pubkey, event_id_bytes) = super::bridge::verify_bridge_auth_with_options(
         headers,
         method,
         &url,
@@ -205,7 +120,7 @@ async fn authenticate(
         true,
         require_payload,
     )?;
-    bridge::check_nip98_replay(state, &tenant, event_id_bytes).await?;
+    super::bridge::check_nip98_replay(state, &tenant, event_id_bytes).await?;
     Ok((tenant, pubkey))
 }
 
@@ -219,10 +134,10 @@ async fn require_owner_or_admin(
         .db
         .get_relay_member(community, &sender_hex)
         .await
-        .map_err(|e| internal_error(&format!("dntls role lookup: {e}")))?;
+        .map_err(|e| super::internal_error(&format!("dntls role lookup: {e}")))?;
     let role = member.map(|m| m.role).unwrap_or_default();
     if role != "owner" && role != "admin" {
-        return Err(api_error(
+        return Err(super::api_error(
             StatusCode::FORBIDDEN,
             "only relay owners and admins can manage DNTLS applications",
         ));
@@ -230,131 +145,115 @@ async fn require_owner_or_admin(
     Ok(())
 }
 
-fn join_rate_limited(
-    state: &AppState,
-    community: buzz_core::tenant::CommunityId,
-    pubkey: &nostr::PublicKey,
-) -> bool {
-    let key = (community, pubkey.to_bytes());
-    let counter = state
-        .dntls_join_rate_limiter
-        .get_with(key, || Arc::new(std::sync::atomic::AtomicU32::new(0)));
-    counter.fetch_add(1, Ordering::Relaxed) >= JOIN_RATE_LIMIT
-}
-
-fn mint_challenge_bytes(
-    cache: &moka::sync::Cache<crate::state::ScopedPubkeyKey, [u8; 32]>,
-    key: crate::state::ScopedPubkeyKey,
-) -> [u8; 32] {
-    let challenge: [u8; 32] = rand::random();
-    cache.insert(key, challenge);
-    challenge
-}
-
-fn consume_challenge(
-    cache: &moka::sync::Cache<crate::state::ScopedPubkeyKey, [u8; 32]>,
-    key: crate::state::ScopedPubkeyKey,
-) -> Option<[u8; 32]> {
-    let challenge = cache.get(&key)?;
-    cache.invalidate(&key);
-    Some(challenge)
-}
-
-fn validate_fqdn(raw: &str) -> Result<&str, (StatusCode, Json<Value>)> {
-    let fqdn = raw.trim();
-    if fqdn.is_empty() || fqdn.len() > 255 {
-        return Err(api_error(StatusCode::BAD_REQUEST, "invalid_fqdn"));
-    }
-    Ok(fqdn)
-}
-
 fn validate_pubkey_hex(value: &str) -> Result<String, (StatusCode, Json<Value>)> {
     crate::handlers::community_provisioning::validate_pubkey_hex(value)
-        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "invalid_pubkey"))
+        .ok_or_else(|| super::api_error(StatusCode::BAD_REQUEST, "invalid_pubkey"))
 }
 
-/// Mint a single-use join challenge — `POST /api/dntls/join/challenge`.
-pub async fn join_challenge(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    require_configured(&state)?;
-    let (tenant, pubkey) =
-        authenticate(&state, &headers, "POST", CHALLENGE_PATH, &body, true).await?;
-    let challenge = mint_challenge_bytes(
-        &state.dntls_join_challenges,
-        (tenant.community(), pubkey.to_bytes()),
-    );
-    Ok(Json(serde_json::json!({
-        "challenge": base64::engine::general_purpose::STANDARD.encode(challenge),
-        "expires_in_secs": CHALLENGE_TTL.as_secs(),
-    })))
-}
-
-/// Verify a join proof and upsert a pending application — `POST /api/dntls/join`.
-pub async fn join(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let introducer_url = require_configured(&state)?;
-    let (tenant, pubkey) = authenticate(&state, &headers, "POST", JOIN_PATH, &body, true).await?;
-
-    if join_rate_limited(&state, tenant.community(), &pubkey) {
-        return Err(api_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too many join attempts, slow down",
-        ));
-    }
-
-    let request: JoinRequest = serde_json::from_slice(&body)
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid join JSON: {e}")))?;
-    let fqdn = validate_fqdn(&request.fqdn)?;
-    let claimer_hex = pubkey.to_hex();
-
-    let Some(challenge) = consume_challenge(
-        &state.dntls_join_challenges,
-        (tenant.community(), pubkey.to_bytes()),
-    ) else {
-        return Err(api_error(StatusCode::BAD_REQUEST, "challenge_required"));
-    };
-
-    let challenge_b64 = base64::engine::general_purpose::STANDARD.encode(challenge);
-    match state
-        .dntls_introducer
-        .verify_join(
-            introducer_url,
-            fqdn,
-            &claimer_hex,
-            &challenge_b64,
-            &request.service_signature,
-        )
-        .await
-    {
-        IntroducerOutcome::Verified => {}
-        IntroducerOutcome::Rejected => {
-            return Err(api_error(StatusCode::FORBIDDEN, "join_proof_rejected"));
-        }
-        IntroducerOutcome::Unavailable => {
-            return Err(api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "introducer_unavailable",
-            ));
-        }
-    }
-
-    match state
+async fn admit_as_member(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    pubkey_hex: &str,
+    fqdn: &str,
+) -> Result<(), String> {
+    let was_inserted = state
         .db
-        .upsert_dntls_pending_application(tenant.community(), &claimer_hex, fqdn)
+        .claim_relay_membership(tenant.community(), pubkey_hex, "member", None)
         .await
-        .map_err(|e| internal_error(&format!("dntls join upsert: {e}")))?
-    {
-        buzz_db::dntls::UpsertJoinOutcome::Pending => Ok(Json(serde_json::json!({
-            "status": "pending",
-        }))),
-        buzz_db::dntls::UpsertJoinOutcome::NameAlreadyClaimed => {
-            Err(api_error(StatusCode::CONFLICT, "name_already_claimed"))
+        .map_err(|e| format!("dntls membership: {e}"))?;
+    if was_inserted {
+        tracing::info!(
+            community = %tenant.community(),
+            member = %pubkey_hex,
+            fqdn,
+            "relay member added via DNTLS admission"
+        );
+        if let Err(e) = publish_nip43_member_added(tenant, state, pubkey_hex).await {
+            tracing::warn!("failed to publish NIP-43 member-added delta after DNTLS admit: {e}");
+        }
+        if let Err(e) = publish_nip43_membership_list(tenant, state).await {
+            tracing::warn!("failed to publish NIP-43 membership list after DNTLS admit: {e}");
+        }
+    }
+    Ok(())
+}
+
+/// Bind or queue a gateway-verified name after NIP-42 AUTH succeeds.
+pub(crate) async fn apply_connection_admission(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    pubkey_hex: &str,
+    fqdn: &str,
+) -> Result<AdmissionEffect, String> {
+    let fqdn = fqdn.trim().to_ascii_lowercase();
+    let fqdn = fqdn.as_str();
+    match state.config.dntls_admission {
+        DntlsAdmission::Off => Ok(AdmissionEffect::Applied),
+        DntlsAdmission::Approve => {
+            match state
+                .db
+                .upsert_dntls_pending_application(tenant.community(), pubkey_hex, fqdn)
+                .await
+                .map_err(|e| format!("dntls pending upsert: {e}"))?
+            {
+                buzz_db::dntls::UpsertJoinOutcome::Pending
+                | buzz_db::dntls::UpsertJoinOutcome::Bound => Ok(AdmissionEffect::Applied),
+                buzz_db::dntls::UpsertJoinOutcome::NameAlreadyClaimed => {
+                    Ok(AdmissionEffect::NameClaimed)
+                }
+            }
+        }
+        DntlsAdmission::Auto => {
+            match state
+                .db
+                .upsert_dntls_approved_application(
+                    tenant.community(),
+                    pubkey_hex,
+                    fqdn,
+                    pubkey_hex,
+                )
+                .await
+                .map_err(|e| format!("dntls approved upsert: {e}"))?
+            {
+                buzz_db::dntls::UpsertJoinOutcome::NameAlreadyClaimed => {
+                    Ok(AdmissionEffect::NameClaimed)
+                }
+                buzz_db::dntls::UpsertJoinOutcome::Pending
+                | buzz_db::dntls::UpsertJoinOutcome::Bound => {
+                    admit_as_member(state, tenant, pubkey_hex, fqdn).await?;
+                    Ok(AdmissionEffect::Applied)
+                }
+            }
+        }
+    }
+}
+
+/// Apply a stored `X-DNTLS-Name` after NIP-42 crypto succeeds.
+///
+/// Returns `false` when AUTH must stop (internal error). A claimed name sends
+/// a NOTICE and still returns `true` so ordinary membership can proceed.
+pub(crate) async fn apply_auth_admission(
+    state: &Arc<AppState>,
+    conn: &ConnectionState,
+    pubkey_hex: &str,
+) -> bool {
+    let Some(fqdn) = conn.dntls_name.as_deref() else {
+        return true;
+    };
+    match apply_connection_admission(state, &conn.tenant, pubkey_hex, fqdn).await {
+        Ok(AdmissionEffect::Applied) => true,
+        Ok(AdmissionEffect::NameClaimed) => {
+            conn.send(RelayMessage::notice(NAME_ALREADY_CLAIMED_NOTICE));
+            true
+        }
+        Err(e) => {
+            tracing::warn!(
+                conn_id = %conn.conn_id,
+                pubkey = %pubkey_hex,
+                error = %e,
+                "DNTLS admission failed"
+            );
+            false
         }
     }
 }
@@ -372,7 +271,7 @@ pub async fn pending(
         .db
         .list_dntls_applications(tenant.community(), "pending")
         .await
-        .map_err(|e| internal_error(&format!("dntls pending list: {e}")))?;
+        .map_err(|e| super::internal_error(&format!("dntls pending list: {e}")))?;
     Ok(Json(serde_json::json!({
         "applications": applications.iter().map(|row| serde_json::json!({
             "pubkey": row.pubkey,
@@ -394,7 +293,7 @@ pub async fn approve(
     require_owner_or_admin(&state, tenant.community(), &pubkey).await?;
 
     let request: PubkeyRequest = serde_json::from_slice(&body).map_err(|e| {
-        api_error(
+        super::api_error(
             StatusCode::BAD_REQUEST,
             &format!("invalid approve JSON: {e}"),
         )
@@ -405,42 +304,28 @@ pub async fn approve(
         .db
         .get_dntls_application(tenant.community(), &target)
         .await
-        .map_err(|e| internal_error(&format!("dntls approve lookup: {e}")))?;
+        .map_err(|e| super::internal_error(&format!("dntls approve lookup: {e}")))?;
     let Some(existing) = existing.filter(|row| row.status == "pending") else {
-        return Err(api_error(StatusCode::NOT_FOUND, "application_not_found"));
+        return Err(super::api_error(
+            StatusCode::NOT_FOUND,
+            "application_not_found",
+        ));
     };
 
-    let was_inserted = state
-        .db
-        .claim_relay_membership(tenant.community(), &target, "member", None)
+    admit_as_member(&state, &tenant, &target, &existing.fqdn)
         .await
-        .map_err(|e| internal_error(&format!("dntls approve membership: {e}")))?;
+        .map_err(|e| super::internal_error(&e))?;
 
     let approved = state
         .db
         .approve_dntls_application(tenant.community(), &target, &pubkey.to_hex())
         .await
-        .map_err(|e| internal_error(&format!("dntls approve persist: {e}")))?
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "application_not_found"))?;
-
-    if was_inserted {
-        tracing::info!(
-            community = %tenant.community(),
-            member = %target,
-            fqdn = %approved.fqdn,
-            "relay member added via DNTLS join"
-        );
-        if let Err(e) = publish_nip43_member_added(&tenant, &state, &target).await {
-            tracing::warn!("failed to publish NIP-43 member-added delta after DNTLS approve: {e}");
-        }
-        if let Err(e) = publish_nip43_membership_list(&tenant, &state).await {
-            tracing::warn!("failed to publish NIP-43 membership list after DNTLS approve: {e}");
-        }
-    }
+        .map_err(|e| super::internal_error(&format!("dntls approve persist: {e}")))?
+        .ok_or_else(|| super::api_error(StatusCode::NOT_FOUND, "application_not_found"))?;
 
     Ok(Json(serde_json::json!({
         "status": "approved",
-        "fqdn": existing.fqdn,
+        "fqdn": approved.fqdn,
     })))
 }
 
@@ -455,7 +340,7 @@ pub async fn reject(
     require_owner_or_admin(&state, tenant.community(), &pubkey).await?;
 
     let request: PubkeyRequest = serde_json::from_slice(&body).map_err(|e| {
-        api_error(
+        super::api_error(
             StatusCode::BAD_REQUEST,
             &format!("invalid reject JSON: {e}"),
         )
@@ -466,9 +351,12 @@ pub async fn reject(
         .db
         .reject_dntls_application(tenant.community(), &target)
         .await
-        .map_err(|e| internal_error(&format!("dntls reject: {e}")))?;
+        .map_err(|e| super::internal_error(&format!("dntls reject: {e}")))?;
     if !deleted {
-        return Err(api_error(StatusCode::NOT_FOUND, "application_not_found"));
+        return Err(super::api_error(
+            StatusCode::NOT_FOUND,
+            "application_not_found",
+        ));
     }
     Ok(Json(serde_json::json!({ "status": "rejected" })))
 }
@@ -480,7 +368,7 @@ pub async fn names(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     require_configured(&state)?;
     let (tenant, pubkey) = authenticate(&state, &headers, "GET", NAMES_PATH, &[], false).await?;
-    relay_members::enforce_relay_membership(
+    super::relay_members::enforce_relay_membership(
         &state,
         tenant.community(),
         &pubkey.to_bytes(),
@@ -494,7 +382,7 @@ pub async fn names(
         .db
         .list_dntls_applications(tenant.community(), "approved")
         .await
-        .map_err(|e| internal_error(&format!("dntls names list: {e}")))?;
+        .map_err(|e| super::internal_error(&format!("dntls names list: {e}")))?;
     Ok(Json(serde_json::json!({
         "names": names.iter().map(name_entry_json).collect::<Vec<_>>(),
     })))
@@ -508,22 +396,32 @@ fn name_entry_json(row: &buzz_db::dntls::DntlsApplication) -> Value {
     })
 }
 
+fn api_error(status: StatusCode, msg: &str) -> (StatusCode, Json<Value>) {
+    super::api_error(status, msg)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::atomic::AtomicU8;
 
+    use base64::Engine;
     use axum::{
         body::{to_bytes, Body},
-        http::{header, Method, Request, StatusCode},
+        extract::ws::Message as WsMessage,
+        http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode},
         routing::{get, post},
         Router,
     };
-    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use nostr::{EventBuilder, Keys, Kind, RelayUrl, Tag};
     use sha2::{Digest, Sha256};
+    use tokio::sync::{mpsc, Mutex, RwLock};
+    use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
     use uuid::Uuid;
 
+    use crate::connection::AuthState;
+    use crate::handlers::auth::handle_auth;
     use crate::router::build_router;
 
     struct AlwaysFreshReplayGuard;
@@ -541,51 +439,7 @@ mod tests {
         }
     }
 
-    struct StubIntroducer {
-        outcome: IntroducerOutcome,
-        calls: Mutex<Vec<(String, String, String, String)>>,
-    }
-
-    impl StubIntroducer {
-        fn new(outcome: IntroducerOutcome) -> Self {
-            Self {
-                outcome,
-                calls: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl IntroducerClient for StubIntroducer {
-        async fn verify_join(
-            &self,
-            _introducer_url: &str,
-            fqdn: &str,
-            nostr_public_key: &str,
-            challenge: &str,
-            service_signature: &str,
-        ) -> IntroducerOutcome {
-            self.calls.lock().expect("stub calls").push((
-                fqdn.to_string(),
-                nostr_public_key.to_string(),
-                challenge.to_string(),
-                service_signature.to_string(),
-            ));
-            self.outcome.clone()
-        }
-    }
-
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
-
-    fn challenge_cache(
-        capacity: u64,
-        ttl: Duration,
-    ) -> moka::sync::Cache<crate::state::ScopedPubkeyKey, [u8; 32]> {
-        moka::sync::Cache::builder()
-            .max_capacity(capacity)
-            .time_to_live(ttl)
-            .build()
-    }
 
     fn nip98_auth_header(keys: &Keys, method: &str, url: &str, body: &[u8]) -> String {
         let hash: [u8; 32] = Sha256::digest(body).into();
@@ -607,7 +461,7 @@ mod tests {
 
     async fn unconfigured_test_state() -> Arc<AppState> {
         let mut config = crate::config::Config::from_env().expect("test config");
-        config.dntls_introducer_url = None;
+        config.dntls_admission = DntlsAdmission::Off;
         config.redis_url = "redis://127.0.0.1:1".to_string();
 
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -645,10 +499,7 @@ mod tests {
         Arc::new(state)
     }
 
-    async fn dntls_test_state(
-        host: &str,
-        introducer: Arc<dyn IntroducerClient>,
-    ) -> Option<Arc<AppState>> {
+    async fn dntls_test_state(host: &str, admission: DntlsAdmission) -> Option<Arc<AppState>> {
         let mut config = crate::config::Config::from_env().ok()?;
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
@@ -657,7 +508,7 @@ mod tests {
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.relay_url = format!("wss://{host}");
         config.require_relay_membership = true;
-        config.dntls_introducer_url = Some("http://127.0.0.1:9".to_string());
+        config.dntls_admission = admission;
 
         let pool = sqlx::PgPool::connect(&database_url).await.ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
@@ -692,7 +543,6 @@ mod tests {
             media_storage,
         );
         state.nip98_replay = Arc::new(AlwaysFreshReplayGuard);
-        state.dntls_introducer = introducer;
         Some(Arc::new(state))
     }
 
@@ -732,6 +582,79 @@ mod tests {
         serde_json::from_slice(&bytes).expect("response JSON")
     }
 
+    fn ws_text(msg: &WsMessage) -> String {
+        match msg {
+            WsMessage::Text(text) => text.to_string(),
+            other => panic!("expected text frame, got {other:?}"),
+        }
+    }
+
+    async fn auth_connection(
+        state: Arc<AppState>,
+        host: &str,
+        keys: &Keys,
+        dntls_name: Option<&str>,
+    ) -> (bool, Vec<String>) {
+        let community = state
+            .db
+            .lookup_community_by_host(host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        let tenant = TenantContext::resolved(community.id, host);
+        let challenge = buzz_auth::generate_challenge();
+        let (send_tx, mut send_rx) = mpsc::channel(16);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let subscriptions = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let conn_id = Uuid::new_v4();
+        let conn = Arc::new(ConnectionState {
+            conn_id,
+            tenant,
+            remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
+            auth_state: RwLock::new(AuthState::Pending {
+                challenge: challenge.clone(),
+            }),
+            subscriptions: Arc::clone(&subscriptions),
+            send_tx: send_tx.clone(),
+            ctrl_tx: ctrl_tx.clone(),
+            cancel: cancel.clone(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+            dntls_name: dntls_name.map(str::to_string),
+        });
+        state.conn_manager.register(
+            conn_id,
+            send_tx,
+            ctrl_tx,
+            None,
+            cancel,
+            conn.tenant.community(),
+            Arc::clone(&conn.backpressure_count),
+            subscriptions,
+            3,
+        );
+
+        let relay_url = crate::api::bridge::nip42_expected_relay_url(
+            &state.config.relay_url,
+            &conn.tenant,
+        );
+        let event = EventBuilder::auth(&challenge, RelayUrl::parse(&relay_url).expect("relay url"))
+            .sign_with_keys(keys)
+            .expect("sign AUTH");
+        handle_auth(event, Arc::clone(&conn), state).await;
+
+        let mut messages = Vec::new();
+        while let Ok(msg) = send_rx.try_recv() {
+            messages.push(ws_text(&msg));
+        }
+        let authenticated = matches!(
+            *conn.auth_state.read().await,
+            AuthState::Authenticated(_)
+        );
+        (authenticated, messages)
+    }
+
     #[test]
     fn names_entry_includes_approved_at_unix_seconds() {
         let approved_at = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("unix seconds");
@@ -749,69 +672,28 @@ mod tests {
     }
 
     #[test]
-    fn map_introducer_response_distinguishes_verified_rejected_unavailable() {
-        assert_eq!(
-            map_introducer_response(200, Some(serde_json::json!({"verified": true}))),
-            IntroducerOutcome::Verified
+    fn verified_name_from_headers_lowercases_and_ignores_empty() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            DNTLS_NAME_HEADER,
+            HeaderValue::from_static("Alice.Example"),
         );
         assert_eq!(
-            map_introducer_response(
-                403,
-                Some(serde_json::json!({"error": "join_proof_rejected"}))
-            ),
-            IntroducerOutcome::Rejected
+            verified_name_from_headers(&headers).as_deref(),
+            Some("alice.example")
         );
-        assert_eq!(
-            map_introducer_response(503, None),
-            IntroducerOutcome::Unavailable
-        );
-        assert_eq!(
-            map_introducer_response(400, None),
-            IntroducerOutcome::Unavailable
-        );
-        assert_eq!(
-            map_introducer_response(200, Some(serde_json::json!({"verified": false}))),
-            IntroducerOutcome::Unavailable
-        );
-        assert_eq!(
-            map_introducer_response(500, None),
-            IntroducerOutcome::Unavailable
-        );
-    }
 
-    #[test]
-    fn dntls_challenge_mint_replaces_and_consume_is_single_use() {
-        let cache = challenge_cache(100, Duration::from_secs(60));
-        let key = (buzz_core::CommunityId::from_uuid(Uuid::nil()), [7; 32]);
+        headers.insert(DNTLS_NAME_HEADER, HeaderValue::from_static("  "));
+        assert_eq!(verified_name_from_headers(&headers), None);
 
-        let first = mint_challenge_bytes(&cache, key);
-        let second = mint_challenge_bytes(&cache, key);
-        assert_ne!(first, second, "newer mint replaces older");
-
-        let consumed = consume_challenge(&cache, key).expect("cached challenge");
-        assert_eq!(consumed, second);
-        assert!(
-            consume_challenge(&cache, key).is_none(),
-            "second consume without re-mint is challenge_required"
-        );
-    }
-
-    #[test]
-    fn dntls_challenge_expires_entries() {
-        let cache = challenge_cache(100, Duration::from_millis(10));
-        let key = (buzz_core::CommunityId::from_uuid(Uuid::nil()), [8; 32]);
-        mint_challenge_bytes(&cache, key);
-        std::thread::sleep(Duration::from_millis(25));
-        cache.run_pending_tasks();
-        assert!(consume_challenge(&cache, key).is_none());
+        headers.clear();
+        assert_eq!(verified_name_from_headers(&headers), None);
     }
 
     #[tokio::test]
     async fn dntls_routes_return_not_found_when_unconfigured() {
         let state = unconfigured_test_state().await;
         let router = Router::new()
-            .route(CHALLENGE_PATH, post(join_challenge))
-            .route(JOIN_PATH, post(join))
             .route(PENDING_PATH, get(pending))
             .route(APPROVE_PATH, post(approve))
             .route(REJECT_PATH, post(reject))
@@ -819,8 +701,6 @@ mod tests {
             .with_state(state);
 
         for (method, path) in [
-            (Method::POST, CHALLENGE_PATH),
-            (Method::POST, JOIN_PATH),
             (Method::GET, PENDING_PATH),
             (Method::POST, APPROVE_PATH),
             (Method::POST, REJECT_PATH),
@@ -849,64 +729,19 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn dntls_join_consumes_challenge_and_creates_pending_row() {
-        let host = format!("dntls-join-{}.example", Uuid::new_v4().simple());
+    async fn dntls_auto_header_auth_binds_and_admits() {
+        let host = format!("dntls-auto-{}.example", Uuid::new_v4().simple());
         let joiner = Keys::generate();
-        let stub = Arc::new(StubIntroducer::new(IntroducerOutcome::Verified));
-        let state = dntls_test_state(&host, stub.clone())
+        let state = dntls_test_state(&host, DntlsAdmission::Auto)
             .await
             .expect("requires reachable Postgres and relay test state");
 
-        let challenge = send(
-            state.clone(),
-            &host,
-            Method::POST,
-            CHALLENGE_PATH,
-            &joiner,
-            "{}".to_string(),
-        )
-        .await;
-        assert_eq!(challenge.status(), StatusCode::OK);
-        let challenge_json = read_json(challenge).await;
-        assert_eq!(
-            challenge_json
-                .get("expires_in_secs")
-                .and_then(Value::as_u64),
-            Some(300)
-        );
-
-        let join_body = serde_json::json!({
-            "fqdn": "alice.example",
-            "service_signature": "c2ln",
-        })
-        .to_string();
-        let joined = send(
-            state.clone(),
-            &host,
-            Method::POST,
-            JOIN_PATH,
-            &joiner,
-            join_body.clone(),
-        )
-        .await;
-        assert_eq!(joined.status(), StatusCode::OK);
-        let json = read_json(joined).await;
-        assert_eq!(json.get("status").and_then(Value::as_str), Some("pending"));
-
-        let replay = send(
-            state.clone(),
-            &host,
-            Method::POST,
-            JOIN_PATH,
-            &joiner,
-            join_body,
-        )
-        .await;
-        assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
-        let json = read_json(replay).await;
-        assert_eq!(
-            json.get("error").and_then(Value::as_str),
-            Some("challenge_required")
+        let (ok, messages) =
+            auth_connection(state.clone(), &host, &joiner, Some("Alice.Example")).await;
+        assert!(ok, "auto AUTH should succeed: {messages:?}");
+        assert!(
+            messages.iter().all(|msg| !msg.contains(NAME_ALREADY_CLAIMED_NOTICE)),
+            "{messages:?}"
         );
 
         let community = state
@@ -915,180 +750,170 @@ mod tests {
             .await
             .expect("lookup")
             .expect("community exists");
+        let hex = joiner.public_key().to_hex();
+        assert!(state
+            .db
+            .is_relay_member(community.id, &hex)
+            .await
+            .expect("membership"));
         let row = state
             .db
-            .get_dntls_application(community.id, &joiner.public_key().to_hex())
+            .get_dntls_application(community.id, &hex)
             .await
-            .expect("lookup application")
+            .expect("lookup")
+            .expect("approved mapping");
+        assert_eq!(row.fqdn, "alice.example");
+        assert_eq!(row.status, "approved");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_approve_header_auth_creates_pending() {
+        let host = format!("dntls-pending-{}.example", Uuid::new_v4().simple());
+        let joiner = Keys::generate();
+        let state = dntls_test_state(&host, DntlsAdmission::Approve)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+
+        let (ok, _messages) =
+            auth_connection(state.clone(), &host, &joiner, Some("alice.example")).await;
+        assert!(!ok, "approve mode must not auto-admit");
+
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        let hex = joiner.public_key().to_hex();
+        assert!(!state
+            .db
+            .is_relay_member(community.id, &hex)
+            .await
+            .expect("membership"));
+        let row = state
+            .db
+            .get_dntls_application(community.id, &hex)
+            .await
+            .expect("lookup")
             .expect("pending row");
         assert_eq!(row.fqdn, "alice.example");
         assert_eq!(row.status, "pending");
-        assert_eq!(stub.calls.lock().expect("calls").len(), 1);
     }
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn dntls_join_rejected_proof_creates_no_row() {
-        let host = format!("dntls-reject-{}.example", Uuid::new_v4().simple());
+    async fn dntls_off_ignores_header() {
+        let host = format!("dntls-off-{}.example", Uuid::new_v4().simple());
         let joiner = Keys::generate();
-        let state = dntls_test_state(
-            &host,
-            Arc::new(StubIntroducer::new(IntroducerOutcome::Rejected)),
-        )
-        .await
-        .expect("requires reachable Postgres and relay test state");
-
-        let challenge = send(
-            state.clone(),
-            &host,
-            Method::POST,
-            CHALLENGE_PATH,
-            &joiner,
-            "{}".to_string(),
-        )
-        .await;
-        assert_eq!(challenge.status(), StatusCode::OK);
-
-        let joined = send(
-            state.clone(),
-            &host,
-            Method::POST,
-            JOIN_PATH,
-            &joiner,
-            serde_json::json!({
-                "fqdn": "alice.example",
-                "service_signature": "c2ln",
-            })
-            .to_string(),
-        )
-        .await;
-        assert_eq!(joined.status(), StatusCode::FORBIDDEN);
-        let json = read_json(joined).await;
-        assert_eq!(
-            json.get("error").and_then(Value::as_str),
-            Some("join_proof_rejected")
-        );
-
+        let state = dntls_test_state(&host, DntlsAdmission::Off)
+            .await
+            .expect("requires reachable Postgres and relay test state");
         let community = state
             .db
             .lookup_community_by_host(&host)
             .await
             .expect("lookup")
             .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &joiner.public_key().to_hex(), "member", None)
+            .await
+            .expect("seed member");
+
+        let (ok, messages) =
+            auth_connection(state.clone(), &host, &joiner, Some("alice.example")).await;
+        assert!(ok, "ordinary AUTH should succeed: {messages:?}");
         let row = state
             .db
             .get_dntls_application(community.id, &joiner.public_key().to_hex())
             .await
-            .expect("lookup application");
+            .expect("lookup");
         assert!(row.is_none());
     }
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn dntls_join_unavailable_introducer_creates_no_row() {
-        let host = format!("dntls-unavail-{}.example", Uuid::new_v4().simple());
-        let joiner = Keys::generate();
-        let state = dntls_test_state(
-            &host,
-            Arc::new(StubIntroducer::new(IntroducerOutcome::Unavailable)),
-        )
-        .await
-        .expect("requires reachable Postgres and relay test state");
-
-        let challenge = send(
-            state.clone(),
-            &host,
-            Method::POST,
-            CHALLENGE_PATH,
-            &joiner,
-            "{}".to_string(),
-        )
-        .await;
-        assert_eq!(challenge.status(), StatusCode::OK);
-
-        let joined = send(
-            state.clone(),
-            &host,
-            Method::POST,
-            JOIN_PATH,
-            &joiner,
-            serde_json::json!({
-                "fqdn": "alice.example",
-                "service_signature": "c2ln",
-            })
-            .to_string(),
-        )
-        .await;
-        assert_eq!(joined.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let json = read_json(joined).await;
-        assert_eq!(
-            json.get("error").and_then(Value::as_str),
-            Some("introducer_unavailable")
-        );
-
-        let community = state
-            .db
-            .lookup_community_by_host(&host)
-            .await
-            .expect("lookup")
-            .expect("community exists");
-        let row = state
-            .db
-            .get_dntls_application(community.id, &joiner.public_key().to_hex())
-            .await
-            .expect("lookup application");
-        assert!(row.is_none());
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn dntls_first_bound_wins_name_conflict() {
+    async fn dntls_first_bound_wins_sends_notice() {
         let host = format!("dntls-conflict-{}.example", Uuid::new_v4().simple());
         let first = Keys::generate();
         let second = Keys::generate();
-        let state = dntls_test_state(
-            &host,
-            Arc::new(StubIntroducer::new(IntroducerOutcome::Verified)),
-        )
-        .await
-        .expect("requires reachable Postgres and relay test state");
-
-        for keys in [&first, &second] {
-            let challenge = send(
-                state.clone(),
-                &host,
-                Method::POST,
-                CHALLENGE_PATH,
-                keys,
-                "{}".to_string(),
+        let state = dntls_test_state(&host, DntlsAdmission::Auto)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(
+                community.id,
+                &second.public_key().to_hex(),
+                "member",
+                None,
             )
-            .await;
-            assert_eq!(challenge.status(), StatusCode::OK);
-        }
+            .await
+            .expect("seed second member");
 
-        let body = serde_json::json!({
-            "fqdn": "shared.example",
-            "service_signature": "c2ln",
-        })
-        .to_string();
-        let ok = send(
-            state.clone(),
-            &host,
-            Method::POST,
-            JOIN_PATH,
-            &first,
-            body.clone(),
-        )
-        .await;
-        assert_eq!(ok.status(), StatusCode::OK);
+        let (ok, _) = auth_connection(state.clone(), &host, &first, Some("shared.example")).await;
+        assert!(ok);
 
-        let conflict = send(state, &host, Method::POST, JOIN_PATH, &second, body).await;
-        assert_eq!(conflict.status(), StatusCode::CONFLICT);
-        let json = read_json(conflict).await;
-        assert_eq!(
-            json.get("error").and_then(Value::as_str),
-            Some("name_already_claimed")
+        let (ok, messages) =
+            auth_connection(state.clone(), &host, &second, Some("shared.example")).await;
+        assert!(ok, "AUTH still succeeds as an ordinary member: {messages:?}");
+        assert!(
+            messages
+                .iter()
+                .any(|msg| msg.contains(NAME_ALREADY_CLAIMED_NOTICE)),
+            "{messages:?}"
         );
+
+        let row = state
+            .db
+            .get_dntls_application(community.id, &first.public_key().to_hex())
+            .await
+            .expect("lookup")
+            .expect("first mapping");
+        assert_eq!(row.fqdn, "shared.example");
+        let stolen = state
+            .db
+            .get_dntls_application(community.id, &second.public_key().to_hex())
+            .await
+            .expect("lookup");
+        assert!(stolen.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_missing_header_is_ordinary_auth() {
+        let host = format!("dntls-plain-{}.example", Uuid::new_v4().simple());
+        let member = Keys::generate();
+        let state = dntls_test_state(&host, DntlsAdmission::Auto)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &member.public_key().to_hex(), "member", None)
+            .await
+            .expect("seed member");
+
+        let (ok, messages) = auth_connection(state.clone(), &host, &member, None).await;
+        assert!(ok, "ordinary AUTH should succeed: {messages:?}");
+        let row = state
+            .db
+            .get_dntls_application(community.id, &member.public_key().to_hex())
+            .await
+            .expect("lookup");
+        assert!(row.is_none());
     }
 
     #[tokio::test]
@@ -1097,12 +922,9 @@ mod tests {
         let host = format!("dntls-approve-{}.example", Uuid::new_v4().simple());
         let owner = Keys::generate();
         let joiner = Keys::generate();
-        let state = dntls_test_state(
-            &host,
-            Arc::new(StubIntroducer::new(IntroducerOutcome::Verified)),
-        )
-        .await
-        .expect("requires reachable Postgres and relay test state");
+        let state = dntls_test_state(&host, DntlsAdmission::Approve)
+            .await
+            .expect("requires reachable Postgres and relay test state");
         let community = state
             .db
             .lookup_community_by_host(&host)
@@ -1114,31 +936,15 @@ mod tests {
             .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
             .await
             .expect("seed owner");
-
-        let challenge = send(
-            state.clone(),
-            &host,
-            Method::POST,
-            CHALLENGE_PATH,
-            &joiner,
-            "{}".to_string(),
-        )
-        .await;
-        assert_eq!(challenge.status(), StatusCode::OK);
-        let joined = send(
-            state.clone(),
-            &host,
-            Method::POST,
-            JOIN_PATH,
-            &joiner,
-            serde_json::json!({
-                "fqdn": "alice.example",
-                "service_signature": "c2ln",
-            })
-            .to_string(),
-        )
-        .await;
-        assert_eq!(joined.status(), StatusCode::OK);
+        state
+            .db
+            .upsert_dntls_pending_application(
+                community.id,
+                &joiner.public_key().to_hex(),
+                "alice.example",
+            )
+            .await
+            .expect("seed pending");
 
         let approved = send(
             state.clone(),
@@ -1178,12 +984,9 @@ mod tests {
         let host = format!("dntls-reject-row-{}.example", Uuid::new_v4().simple());
         let owner = Keys::generate();
         let joiner = Keys::generate();
-        let state = dntls_test_state(
-            &host,
-            Arc::new(StubIntroducer::new(IntroducerOutcome::Verified)),
-        )
-        .await
-        .expect("requires reachable Postgres and relay test state");
+        let state = dntls_test_state(&host, DntlsAdmission::Approve)
+            .await
+            .expect("requires reachable Postgres and relay test state");
         let community = state
             .db
             .lookup_community_by_host(&host)
@@ -1195,31 +998,15 @@ mod tests {
             .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
             .await
             .expect("seed owner");
-
-        let challenge = send(
-            state.clone(),
-            &host,
-            Method::POST,
-            CHALLENGE_PATH,
-            &joiner,
-            "{}".to_string(),
-        )
-        .await;
-        assert_eq!(challenge.status(), StatusCode::OK);
-        let joined = send(
-            state.clone(),
-            &host,
-            Method::POST,
-            JOIN_PATH,
-            &joiner,
-            serde_json::json!({
-                "fqdn": "alice.example",
-                "service_signature": "c2ln",
-            })
-            .to_string(),
-        )
-        .await;
-        assert_eq!(joined.status(), StatusCode::OK);
+        state
+            .db
+            .upsert_dntls_pending_application(
+                community.id,
+                &joiner.public_key().to_hex(),
+                "alice.example",
+            )
+            .await
+            .expect("seed pending");
 
         let rejected = send(
             state.clone(),
@@ -1258,12 +1045,9 @@ mod tests {
         let owner = Keys::generate();
         let member = Keys::generate();
         let outsider = Keys::generate();
-        let state = dntls_test_state(
-            &host,
-            Arc::new(StubIntroducer::new(IntroducerOutcome::Verified)),
-        )
-        .await
-        .expect("requires reachable Postgres and relay test state");
+        let state = dntls_test_state(&host, DntlsAdmission::Auto)
+            .await
+            .expect("requires reachable Postgres and relay test state");
         let community = state
             .db
             .lookup_community_by_host(&host)

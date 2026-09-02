@@ -68,8 +68,8 @@ function runSql(sql: string) {
 
 /**
  * Upsert an approved DNTLS mapping for the e2e community on localhost:3000.
- * Join-proof verification is out of scope; the desktop only reads this table
- * through GET /api/dntls/names.
+ * Admission happens at AUTH; the desktop only reads this table through
+ * GET /api/dntls/names.
  */
 export function seedApprovedDntlsName(input: {
   approvedBy: string;
