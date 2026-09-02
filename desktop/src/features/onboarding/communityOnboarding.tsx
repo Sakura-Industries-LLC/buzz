@@ -38,6 +38,8 @@ export type CommunityOnboardingTransaction = {
   relayUrl: string;
   inviteCode?: string;
   communityName: string;
+  /** DNTLS authority used to recreate the session-local relay connector. */
+  dntlsName?: string;
   token?: string;
   reposDir?: string;
   /**
@@ -77,6 +79,8 @@ export type StartCommunityOnboardingInput = {
   relayUrl: string;
   inviteCode?: string;
   communityName?: string;
+  /** DNTLS authority used to recreate the session-local relay connector. */
+  dntlsName?: string;
   token?: string;
   reposDir?: string;
   policyReceipt?: string;
@@ -160,6 +164,7 @@ export function startCommunityOnboarding(
         input.firstCommunityPage ?? existing.firstCommunityPage,
       inviteCode: input.inviteCode?.trim() || existing.inviteCode,
       communityName: input.communityName?.trim() || existing.communityName,
+      dntlsName: input.dntlsName ?? existing.dntlsName,
       token: input.token?.trim() || existing.token,
       reposDir: input.reposDir ?? existing.reposDir,
       policyReceipt: input.policyReceipt ?? existing.policyReceipt,
@@ -182,6 +187,7 @@ export function startCommunityOnboarding(
     relayUrl,
     inviteCode: input.inviteCode?.trim() || undefined,
     communityName: input.communityName?.trim() || deriveCommunityName(relayUrl),
+    dntlsName: input.dntlsName,
     token: input.token?.trim() || undefined,
     reposDir: input.reposDir,
     policyReceipt: input.policyReceipt,

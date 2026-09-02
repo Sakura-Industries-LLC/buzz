@@ -2,6 +2,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -16,6 +17,7 @@ import {
   saveActiveCommunityId,
   saveCommunities,
 } from "./communityStorage";
+import { startDntlsConnector } from "./dntlsConnector";
 import { removeSelfProfileCachesForRelay } from "@/features/profile/lib/selfProfileStorage";
 import { removeUserLabelCacheForRelay } from "@/features/profile/lib/userLabelStorage";
 import { removeChannelSnapshotForRelay } from "@/features/channels/channelSnapshot";
@@ -183,6 +185,45 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
   const communitiesRef = useRef(communities);
   communitiesRef.current = communities;
 
+  useEffect(() => {
+    let cancelled = false;
+    for (const community of communitiesRef.current) {
+      if (!community.dntlsName) continue;
+      void startDntlsConnector(community.dntlsName)
+        .then((ready) => {
+          if (cancelled) return;
+          setCommunitiesState((previous) => {
+            const current = previous.find((item) => item.id === community.id);
+            if (!current || current.relayUrl === ready.relayUrl)
+              return previous;
+            const next = previous.map((item) =>
+              item.id === community.id
+                ? {
+                    ...item,
+                    relayUrl: ready.relayUrl,
+                    dntlsName: ready.community,
+                  }
+                : item,
+            );
+            saveCommunities(next);
+            return next;
+          });
+          if (community.id === activeId) {
+            setReinitKey((key) => key + 1);
+          }
+        })
+        .catch((error) => {
+          console.warn(
+            `Failed to restore DNTLS community ${community.dntlsName}`,
+            error,
+          );
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [activeId]);
+
   const activeCommunity = useMemo(
     () => communities.find((w) => w.id === activeId) ?? communities[0] ?? null,
     [communities, activeId],
@@ -204,6 +245,7 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
                 name: community.name || w.name,
                 token: community.token ?? w.token,
                 pubkey: community.pubkey ?? w.pubkey,
+                dntlsName: community.dntlsName ?? w.dntlsName,
               }
             : w,
         );
@@ -299,9 +341,17 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
 
       if (result.kind === "updated") {
         setCommunitiesState((prev) => {
-          const next = prev.map((w) =>
-            w.id === id ? { ...w, ...updates } : w,
-          );
+          const next = prev.map((community) => {
+            if (community.id !== id) return community;
+            const relayChanged =
+              updates.relayUrl !== undefined &&
+              updates.relayUrl !== community.relayUrl;
+            return {
+              ...community,
+              ...updates,
+              dntlsName: relayChanged ? undefined : community.dntlsName,
+            };
+          });
           saveCommunities(next);
           return next;
         });

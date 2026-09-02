@@ -53,10 +53,12 @@ export function AddCommunityDialog({
   const startConnection = React.useCallback(
     ({
       relayUrl,
+      dntlsName,
       inviteCode,
       policyReceipt,
     }: {
       relayUrl: string;
+      dntlsName?: string;
       inviteCode?: string;
       policyReceipt?: string;
     }) => {
@@ -64,7 +66,8 @@ export function AddCommunityDialog({
         source: "add-community",
         relayUrl,
         inviteCode,
-        communityName: prefill?.name,
+        communityName: dntlsName ?? prefill?.name,
+        dntlsName,
         policyReceipt,
       });
       if (!started) {
@@ -89,7 +92,7 @@ export function AddCommunityDialog({
     mode === "create"
       ? "Opens Builderlab in your browser."
       : mode === "join"
-        ? "Use the community URL or invite link you received."
+        ? "Use a community URL, DNTLS name, or invite link."
         : "Create a new community or join one you already have.";
 
   return (
@@ -166,7 +169,7 @@ export function AddCommunityDialog({
                     Join an existing community
                   </span>
                   <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">
-                    Use a community URL or invite link.
+                    Use a community URL, DNTLS name, or invite link.
                   </span>
                 </span>
                 <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground/60" />
@@ -182,7 +185,9 @@ export function AddCommunityDialog({
                 setJoinError(null);
                 setMode("choose");
               }}
-              onConnect={(relayUrl) => startConnection({ relayUrl })}
+              onConnect={(relayUrl, dntlsName) =>
+                startConnection({ relayUrl, dntlsName })
+              }
               onRedeem={(relayUrl, inviteCode, policyReceipt) =>
                 startConnection({ relayUrl, inviteCode, policyReceipt })
               }

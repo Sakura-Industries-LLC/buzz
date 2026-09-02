@@ -54,7 +54,8 @@ function parseNames(payload: RawDntlsNamesResponse): DntlsNamesMap {
       continue;
     }
     const approvedAt =
-      typeof entry.approved_at === "number" && Number.isFinite(entry.approved_at)
+      typeof entry.approved_at === "number" &&
+      Number.isFinite(entry.approved_at)
         ? entry.approved_at
         : 0;
     names.set(pubkey, { fqdn, approvedAt });
@@ -85,7 +86,9 @@ export async function fetchDntlsNames(): Promise<DntlsNamesMap> {
       console.debug(`dntls names: fetch failed (${response.status})`);
       return new Map();
     }
-    const json = (await response.json().catch(() => ({}))) as RawDntlsNamesResponse;
+    const json = (await response
+      .json()
+      .catch(() => ({}))) as RawDntlsNamesResponse;
     return parseNames(json);
   } catch (error) {
     console.debug("dntls names: fetch failed", error);

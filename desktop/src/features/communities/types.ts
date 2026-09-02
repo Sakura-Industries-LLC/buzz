@@ -4,6 +4,11 @@ export type Community = {
   relayUrl: string;
   token?: string;
   /**
+   * DNTLS authority used to recreate the session-local relay connector.
+   * Unset for ordinary ws/wss communities.
+   */
+  dntlsName?: string;
+  /**
    * The pubkey associated with the active identity at the time the community
    * was created. Display-only — auth always uses the persisted `identity.key`
    * file resolved at startup, never this field.

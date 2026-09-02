@@ -462,11 +462,10 @@ mod tests {
     fn build_advertises_buzz_capability() {
         let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
 
-        assert!(
-            info.supported_extensions
-                .expect("supported extensions")
-                .contains(&BUZZ_EXTENSION.to_string())
-        );
+        assert!(info
+            .supported_extensions
+            .expect("supported extensions")
+            .contains(&BUZZ_EXTENSION.to_string()));
     }
 
     #[test]

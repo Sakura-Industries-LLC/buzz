@@ -1,4 +1,4 @@
-import { test } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -55,13 +55,44 @@ test("capture: add-community choices", async ({ page }) => {
 test("capture: join an existing community", async ({ page }) => {
   await page.getByTestId("add-community-join").click();
   const dialog = page.getByTestId("add-community-dialog");
-  const communityUrl = page.getByLabel("Community URL or invite link");
+  const communityUrl = page.getByLabel(
+    "Community URL, DNTLS name, or invite link",
+  );
   await communityUrl.fill("community.example.com");
   await page.getByTestId("community-api-token-reveal").waitFor({
     state: "detached",
   });
   await waitForAnimations(page);
   await dialog.screenshot({ path: `${OUTDIR}/02-join.png` });
+});
+
+test("joins by exact DNTLS community name", async ({ page }) => {
+  await page.getByTestId("add-community-join").click();
+  const communityName = page.getByLabel(
+    "Community URL, DNTLS name, or invite link",
+  );
+  await communityName.fill("Community.Example.DNTLS.");
+
+  const submit = page.getByTestId("invite-redeem-submit");
+  await expect(submit).toBeEnabled();
+  await submit.click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.__BUZZ_E2E_COMMAND_PAYLOADS__?.some(
+          (entry) =>
+            entry.command === "start_dntls_connector" &&
+            entry.payload?.community === "community.example.dntls",
+        ),
+      ),
+    )
+    .toBe(true);
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.localStorage.getItem("buzz-communities")),
+    )
+    .toContain('"dntlsName":"community.example.dntls"');
 });
 
 test("capture: create a new community", async ({ page }) => {

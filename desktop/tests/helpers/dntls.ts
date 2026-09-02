@@ -5,7 +5,8 @@ const DB_PORT = process.env.BUZZ_DB_PORT ?? "5432";
 const DB_USER = process.env.BUZZ_DB_USER ?? "buzz";
 const DB_PASS = process.env.BUZZ_DB_PASS ?? "buzz_dev";
 const DB_NAME = process.env.BUZZ_DB_NAME ?? "buzz";
-const DB_DOCKER_CONTAINER = process.env.BUZZ_DB_DOCKER_CONTAINER ?? "buzz-postgres";
+const DB_DOCKER_CONTAINER =
+  process.env.BUZZ_DB_DOCKER_CONTAINER ?? "buzz-postgres";
 const COMMUNITY_HOST = process.env.BUZZ_COMMUNITY_HOST ?? "localhost:3000";
 
 function runSql(sql: string) {
@@ -13,7 +14,20 @@ function runSql(sql: string) {
   try {
     return execFileSync(
       "psql",
-      ["-h", DB_HOST, "-p", DB_PORT, "-U", DB_USER, "-d", DB_NAME, "-v", "ON_ERROR_STOP=1", "-c", sql],
+      [
+        "-h",
+        DB_HOST,
+        "-p",
+        DB_PORT,
+        "-U",
+        DB_USER,
+        "-d",
+        DB_NAME,
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-c",
+        sql,
+      ],
       { env, encoding: "utf8" },
     );
   } catch (psqlError) {
@@ -42,7 +56,9 @@ function runSql(sql: string) {
       const psqlMessage =
         psqlError instanceof Error ? psqlError.message : String(psqlError);
       const dockerMessage =
-        dockerError instanceof Error ? dockerError.message : String(dockerError);
+        dockerError instanceof Error
+          ? dockerError.message
+          : String(dockerError);
       throw new Error(
         `Failed to seed DNTLS row via psql (${psqlMessage}) or docker (${dockerMessage})`,
       );
@@ -78,7 +94,6 @@ SET fqdn = EXCLUDED.fqdn,
     approved_by = EXCLUDED.approved_by;
 `);
 }
-
 
 /**
  * Grant TEST_IDENTITIES membership on the e2e community so NIP-98 names
