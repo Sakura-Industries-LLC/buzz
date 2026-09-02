@@ -1,5 +1,9 @@
 import { relayClient } from "@/shared/api/relayClient";
-import { getRelayHttpUrl, signRelayEvent } from "@/shared/api/tauri";
+import {
+  canonicalAuthUrl,
+  getRelayHttpUrl,
+  signRelayEvent,
+} from "@/shared/api/tauri";
 import {
   KIND_MODERATION_BAN,
   KIND_MODERATION_RESOLVE_REPORT,
@@ -236,7 +240,7 @@ async function nip98GetHeader(url: string): Promise<string> {
 async function moderationGet<T>(pathWithQuery: string): Promise<T> {
   const base = (await getRelayHttpUrl()).replace(/\/+$/, "");
   const url = `${base}${pathWithQuery}`;
-  const authorization = await nip98GetHeader(url);
+  const authorization = await nip98GetHeader(await canonicalAuthUrl(url));
   const response = await fetch(url, {
     headers: { Authorization: authorization },
   });

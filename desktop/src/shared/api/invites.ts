@@ -1,5 +1,6 @@
 import { relayHttpFromWs } from "@/shared/api/inviteHelpers";
 import {
+  canonicalAuthUrl,
   getRelayHttpUrl,
   invokeTauri,
   signRelayEvent,
@@ -81,7 +82,7 @@ async function invitePost<T>(
   body: string,
 ): Promise<T> {
   const url = `${httpBase.replace(/\/+$/, "")}${path}`;
-  const authorization = await nip98PostHeader(url, body);
+  const authorization = await nip98PostHeader(await canonicalAuthUrl(url), body);
   const response = await fetch(url, {
     method: "POST",
     headers: {

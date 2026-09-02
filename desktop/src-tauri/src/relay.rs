@@ -97,6 +97,86 @@ pub fn relay_http_base_url(relay_url: &str) -> String {
     trimmed.to_string()
 }
 
+/// Host used in NIP-42 `relay` tags and NIP-98 `u` tags for a DNTLS community.
+///
+/// Transport may be a loopback connector URL (`ws://127.0.0.1:port`). The
+/// signed authority is the community name with no port, matching
+/// `nip42_expected_relay_url` / `nip98_expected_url` which key off the
+/// tenant `Host` header. Ordinary communities leave this unset and sign the
+/// transport URL unchanged.
+pub(crate) fn workspace_canonical_host(state: &AppState) -> Option<String> {
+    state
+        .canonical_relay_host
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+/// ASCII-lowercase DNTLS community host, or `None` when empty.
+pub fn canonical_dntls_host(dntls_name: &str) -> Option<String> {
+    let host = dntls_name
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
+}
+
+/// Rewrite `transport_url` onto `canonical_host`, keeping scheme/path/query.
+///
+/// Scheme is preserved so a local `RELAY_URL=ws://…` deployment expects
+/// `ws://name` / `http://name/…` while a `wss://` deployment expects
+/// `wss://` / `https://`. The port is dropped because the community origin
+/// has none. `None` returns `transport_url` unchanged.
+pub fn rewrite_url_for_auth(transport_url: &str, canonical_host: Option<&str>) -> String {
+    let Some(host) = canonical_host
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return transport_url.to_string();
+    };
+    let host = strip_url_scheme(host.trim_end_matches('/')).to_ascii_lowercase();
+    if host.is_empty() {
+        return transport_url.to_string();
+    }
+
+    let trimmed = transport_url.trim();
+    let Some((scheme, rest)) = split_scheme(trimmed) else {
+        return transport_url.to_string();
+    };
+    format!("{scheme}://{host}{}", path_query_of(rest))
+}
+
+/// Sign-tag URL for `transport_url` under the active workspace's DNTLS host.
+pub fn auth_url_for_transport(state: &AppState, transport_url: &str) -> String {
+    rewrite_url_for_auth(transport_url, workspace_canonical_host(state).as_deref())
+}
+
+fn strip_url_scheme(value: &str) -> &str {
+    value
+        .strip_prefix("wss://")
+        .or_else(|| value.strip_prefix("ws://"))
+        .or_else(|| value.strip_prefix("https://"))
+        .or_else(|| value.strip_prefix("http://"))
+        .unwrap_or(value)
+}
+
+fn split_scheme(value: &str) -> Option<(&str, &str)> {
+    let idx = value.find("://")?;
+    Some((&value[..idx], &value[idx + 3..]))
+}
+
+fn path_query_of(rest: &str) -> &str {
+    match rest.find(|c: char| c == '/' || c == '?' || c == '#') {
+        Some(i) => &rest[i..],
+        None => "",
+    }
+}
+
+
 mod scope;
 pub use scope::{
     assert_expected_relay_scope, assert_expected_signer, bind_expected_relay_scope,
@@ -124,7 +204,8 @@ pub fn build_nip98_auth_header(
     state: &AppState,
 ) -> Result<String, String> {
     let keys = state.keys.lock().map_err(|error| error.to_string())?;
-    build_nip98_auth_header_for_keys(&keys, method, url, body)
+    let url = auth_url_for_transport(state, url);
+    build_nip98_auth_header_for_keys(&keys, method, &url, body)
 }
 
 pub fn build_nip98_auth_header_for_keys(
@@ -399,7 +480,12 @@ pub async fn query_relay_at_with_keys(
     let url = format!("{}/query", api_base_url);
     let body_bytes =
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
-    let auth = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
+    let auth = build_nip98_auth_header_for_keys(
+        keys,
+        &Method::POST,
+        &auth_url_for_transport(state, &url),
+        &body_bytes,
+    )?;
     send_query_request(
         &state.http_client,
         &url,
@@ -528,7 +614,12 @@ pub async fn sync_managed_agent_profile(
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "agent profile sync")?;
 
     let url = format!("{}/events", relay_http_base_url(relay_url));
-    let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, &url, &body_bytes)?;
+    let auth = build_nip98_auth_header_for_keys(
+        agent_keys,
+        &Method::POST,
+        &auth_url_for_transport(state, &url),
+        &body_bytes,
+    )?;
 
     let mut request = state
         .http_client
@@ -647,7 +738,12 @@ pub async fn submit_signed_event_with_keys(
     let url = format!("{}/events", relay_api_base_url_with_override(state));
     let body_bytes = event.as_json().into_bytes();
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "signed event submit (keys)")?;
-    let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
+    let auth_header = build_nip98_auth_header_for_keys(
+        keys,
+        &Method::POST,
+        &auth_url_for_transport(state, &url),
+        &body_bytes,
+    )?;
 
     let mut request = state
         .http_client

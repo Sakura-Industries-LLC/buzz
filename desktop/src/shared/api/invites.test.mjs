@@ -105,6 +105,7 @@ function setupTauriStubs(
     invoke: async (command, args) => {
       calls.invokeArgs.push({ command, args });
       if (command === "get_relay_http_url") return httpBase;
+      if (command === "canonical_auth_url") return args.url;
       if (command === "sign_event") return JSON.stringify(authEvent);
       throw new Error(`Unexpected Tauri command: ${command}`);
     },

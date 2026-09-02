@@ -155,6 +155,7 @@ pub async fn apply_workspace(
     nsec: Option<String>,
     repos_dir: Option<String>,
     agent_managed_profiles: Option<bool>,
+    dntls_name: Option<String>,
     app: AppHandle,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
@@ -214,6 +215,15 @@ pub async fn apply_workspace(
         {
             let mut override_guard = state.relay_url_override.lock().map_err(|e| e.to_string())?;
             *override_guard = Some(relay_url);
+        }
+        {
+            let mut host_guard = state
+                .canonical_relay_host
+                .lock()
+                .map_err(|e| e.to_string())?;
+            *host_guard = dntls_name
+                .as_deref()
+                .and_then(crate::relay::canonical_dntls_host);
         }
         // Reset the Rust-side admission gate when switching workspace/community,
         // matching `resetRateLimitGate()` on the TS side (useCommunityInit.ts:38).

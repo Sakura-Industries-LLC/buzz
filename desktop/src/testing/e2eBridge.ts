@@ -13058,6 +13058,17 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "get_relay_http_url":
         return getRelayHttpUrl(activeConfig);
+      case "canonical_auth_url": {
+        if (
+          payload &&
+          typeof payload === "object" &&
+          "url" in payload &&
+          typeof payload.url === "string"
+        ) {
+          return payload.url;
+        }
+        return "";
+      }
       case "relay_requires_membership":
         return activeConfig?.mock?.relayRequiresMembership ?? false;
       case "discover_acp_providers":

@@ -601,6 +601,7 @@ pub fn run() {
             is_shared_identity,
             get_relay_ws_url,
             get_relay_http_url,
+            canonical_auth_url,
             get_media_proxy_port,
             fetch_link_preview_metadata,
             discover_acp_auth_methods,

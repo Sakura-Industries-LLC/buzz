@@ -1,4 +1,8 @@
-import { getRelayHttpUrl, signRelayEvent } from "@/shared/api/tauri";
+import {
+  canonicalAuthUrl,
+  getRelayHttpUrl,
+  signRelayEvent,
+} from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 const NIP98_KIND = 27235;
@@ -73,7 +77,7 @@ export async function fetchDntlsNames(): Promise<DntlsNamesMap> {
   try {
     const base = (await getRelayHttpUrl()).replace(/\/+$/, "");
     const url = `${base}${NAMES_PATH}`;
-    const authorization = await nip98GetHeader(url);
+    const authorization = await nip98GetHeader(await canonicalAuthUrl(url));
     const response = await fetch(url, {
       headers: { Authorization: authorization },
       signal: AbortSignal.timeout(NAMES_REQUEST_TIMEOUT_MS),

@@ -16,8 +16,9 @@ function setupTauriStubs(
 ) {
   globalThis.window = globalThis.window ?? {};
   globalThis.window.__TAURI_INTERNALS__ = {
-    invoke: async (command) => {
+    invoke: async (command, args) => {
       if (command === "get_relay_http_url") return httpBase;
+      if (command === "canonical_auth_url") return args.url;
       if (command === "sign_event") return JSON.stringify(authEvent);
       throw new Error(`Unexpected Tauri command: ${command}`);
     },
@@ -99,6 +100,53 @@ test("fetchDntlsNames fail-safe returns empty map on fetch failure", async () =>
         const names = await fetchDntlsNames();
         assert.equal(names.size, 0);
       },
+    );
+  } finally {
+    teardownTauriStubs();
+  }
+});
+
+test("fetchDntlsNames signs the DNTLS origin while fetching the loopback URL", async () => {
+  const signed = [];
+  globalThis.window = globalThis.window ?? {};
+  globalThis.window.__TAURI_INTERNALS__ = {
+    invoke: async (command, args) => {
+      if (command === "get_relay_http_url") return "http://127.0.0.1:63330";
+      if (command === "canonical_auth_url") {
+        return args.url.replace(
+          "http://127.0.0.1:63330",
+          "http://buzzdemo.dntls",
+        );
+      }
+      if (command === "sign_event") {
+        signed.push(args);
+        return JSON.stringify({
+          id: "x",
+          sig: "y",
+          pubkey: "z",
+          kind: 27235,
+          created_at: 1,
+          tags: args.tags,
+        });
+      }
+      throw new Error(`Unexpected Tauri command: ${command}`);
+    },
+  };
+  try {
+    await withFetch(
+      async (url) => {
+        assert.equal(url, "http://127.0.0.1:63330/api/dntls/names");
+        return new Response(JSON.stringify({ names: [] }));
+      },
+      async () => {
+        await fetchDntlsNames();
+      },
+    );
+    assert.equal(signed.length, 1);
+    assert.equal(signed[0].tags[0][0], "u");
+    assert.equal(
+      signed[0].tags[0][1],
+      "http://buzzdemo.dntls/api/dntls/names",
     );
   } finally {
     teardownTauriStubs();
