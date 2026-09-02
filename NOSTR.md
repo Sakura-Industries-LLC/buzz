@@ -117,9 +117,12 @@ to loopback behind the gateway so clients cannot set the header themselves.
 | `approve` | Create or refresh a pending application. Owners/admins admit it with `POST /api/dntls/approve` (or reject with `POST /api/dntls/reject`). |
 
 First-bound-wins: if the fqdn is already mapped to a different pubkey in that
-community, the name is not re-bound. AUTH still succeeds as an ordinary
-(non-verified) member when membership allows, and the relay sends
+community, the name is not re-bound. AUTH still succeeds, but the key is only
+usable if it is already a relay member, and the relay sends
 `NOTICE dntls: name already claimed`. Reconnects are idempotent.
+
+The deployment community host must equal the DNTLS name: `RELAY_URL=wss://<name>`
+seeds it, and the connector forwards `Host: <name>`.
 
 `GET /api/dntls/names` returns the approved mappings `{ pubkey, fqdn, approved_at }`
 for members. The desktop verified-name badge reads this list.
