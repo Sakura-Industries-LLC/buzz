@@ -63,12 +63,11 @@ pub(crate) async fn import_dntls_credentials(
     app: AppHandle,
 ) -> Result<Option<DntlsCredentialsStatus>, String> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    app.dialog()
-        .file()
-        .add_filter("DNTLS credentials", &["bundle", "dntls-credentials"])
-        .pick_file(move |path| {
-            let _ = sender.send(path);
-        });
+    // No extension filter: macOS treats "bundle" as the package UTI, so Portal
+    // `*.dntls.bundle` files appear in the list but cannot be opened.
+    app.dialog().file().pick_file(move |path| {
+        let _ = sender.send(path);
+    });
     let selected = receiver
         .await
         .map_err(|_| "credentials dialog was interrupted".to_string())?;
