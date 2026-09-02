@@ -63,7 +63,7 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **Membership notifications** | ✅ | kind:44100 (added) / kind:44101 (removed); relay-signed, community-global scope (`channel_id=None` inside the connected community) |
 | **Presence (kind:20001)** | ✅ | Ephemeral; arbitrary status string (truncated to 128 chars); writes to Redis (`set_presence`/`clear_presence` on `"offline"`), then fan-out to local subscribers. In multi-community mode presence is scoped to the connected community. |
 | **Typing indicators (kind:20002)** | ✅ | Ephemeral, not stored; published via Redis pub/sub (multi-node capable unlike presence fan-out) |
-| **NIP-42 authentication** | ✅ | Proactive challenge; optional pubkey allowlist |
+| **NIP-42 authentication** | ✅ | Proactive challenge; optional pubkey allowlist; optional DNTLS admission from `X-DNTLS-Name` |
 | **NIP-11 relay info** | ✅ | `GET /` with `Accept: application/nostr+json`; advertises `"buzz"` in `supported_extensions` |
 | **Blossom media** | ✅ | `PUT /media/upload` (BUD-02), `GET /media/{sha256}.{ext}` (BUD-01) |
 | **NIP-50 search** | ✅ | One-shot search REQs: `{"search":"query","kinds":[9],"#h":["<uuid>"]}` → relevance-sorted results → EOSE. Not registered as persistent subscriptions. |
@@ -98,6 +98,34 @@ relay to specific external Nostr identities without granting full access.
   DELETE FROM pubkey_allowlist WHERE pubkey = decode('<64-char-hex-pubkey>', 'hex');
   SELECT encode(pubkey, 'hex'), added_at, note FROM pubkey_allowlist;
   ```
+
+
+### DNTLS admission
+
+A DNTLS gateway terminates mutual TLS in front of the relay and forwards the
+verified name on every proxied request, including the WebSocket upgrade, as
+`X-DNTLS-Name`. The value is the verified DNTLS FQDN, lowercased. The relay
+trusts that header unconditionally when admission is enabled. Bind the relay
+to loopback behind the gateway so clients cannot set the header themselves.
+
+`BUZZ_DNTLS_ADMISSION` selects the AUTH-time behaviour:
+
+| Mode | Effect |
+|------|--------|
+| `off` (default) | Header ignored. Every `/api/dntls` route returns 404. |
+| `auto` | At first successful NIP-42 AUTH, bind `nostr pubkey ↔ dntls fqdn` for that community and admit the pubkey as a member. |
+| `approve` | Create or refresh a pending application. Owners/admins admit it with `POST /api/dntls/approve` (or reject with `POST /api/dntls/reject`). |
+
+First-bound-wins: if the fqdn is already mapped to a different pubkey in that
+community, the name is not re-bound. AUTH still succeeds, but the key is only
+usable if it is already a relay member, and the relay sends
+`NOTICE dntls: name already claimed`. Reconnects are idempotent.
+
+The deployment community host must equal the DNTLS name: `RELAY_URL=wss://<name>`
+seeds it, and the connector forwards `Host: <name>`.
+
+`GET /api/dntls/names` returns the approved mappings `{ pubkey, fqdn, approved_at }`
+for members. The desktop verified-name badge reads this list.
 
 ### Group Discovery
 

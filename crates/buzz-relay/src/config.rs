@@ -357,9 +357,9 @@ pub struct Config {
     /// documents or age attestation are configured.
     pub join_policy: Option<JoinPolicyConfig>,
 
-    /// Optional DNTLS introducer base URL (`BUZZ_DNTLS_INTRODUCER_URL`).
-    /// When unset, every `/api/dntls` route returns 404.
-    pub dntls_introducer_url: Option<String>,
+    /// How gateway-verified DNTLS names are admitted (`BUZZ_DNTLS_ADMISSION`).
+    /// `Off` (default) ignores `X-DNTLS-Name` and 404s every `/api/dntls` route.
+    pub dntls_admission: DntlsAdmission,
 
     /// Deployment-admin API and SPA configuration. Absent means the surface is disabled.
     pub admin: Option<AdminConfig>,
@@ -371,6 +371,23 @@ pub struct Config {
     /// Whether the configured web bundle serves Git browser routes in addition
     /// to the public invite landing page. Defaults to false.
     pub serve_git_web_gui: bool,
+}
+
+/// How the relay admits DNTLS-authenticated connections.
+///
+/// Configured by `BUZZ_DNTLS_ADMISSION`. The gateway-verified name arrives in
+/// the `X-DNTLS-Name` header; this setting decides what the relay does with it
+/// at NIP-42 AUTH. The header is trusted unconditionally when this is not
+/// [`DntlsAdmission::Off`]; bind the relay to loopback behind the gateway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DntlsAdmission {
+    /// Header ignored; every `/api/dntls` route returns 404.
+    #[default]
+    Off,
+    /// Bind pubkey↔name at first successful AUTH and admit as a member.
+    Auto,
+    /// Create or refresh a pending application; owners/admins admit it.
+    Approve,
 }
 
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -1184,25 +1201,19 @@ impl Config {
             .map(|value| value == "true" || value == "1")
             .unwrap_or(false);
 
-        let dntls_introducer_url = std::env::var("BUZZ_DNTLS_INTRODUCER_URL")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .map(|value| {
-                let parsed = url::Url::parse(&value).map_err(|e| {
-                    ConfigError::InvalidValue(format!(
-                        "BUZZ_DNTLS_INTRODUCER_URL must be a valid http:// or https:// URL: {e}"
-                    ))
-                })?;
-                if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        let dntls_admission = match std::env::var("BUZZ_DNTLS_ADMISSION") {
+            Err(_) => DntlsAdmission::Off,
+            Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+                "" | "off" => DntlsAdmission::Off,
+                "auto" => DntlsAdmission::Auto,
+                "approve" => DntlsAdmission::Approve,
+                _ => {
                     return Err(ConfigError::InvalidValue(
-                        "BUZZ_DNTLS_INTRODUCER_URL must be a valid http:// or https:// URL"
-                            .to_string(),
+                        "BUZZ_DNTLS_ADMISSION must be off, auto, or approve".to_string(),
                     ));
                 }
-                Ok(value.trim_end_matches('/').to_string())
-            })
-            .transpose()?;
+            },
+        };
 
         if let Some(ref dir) = web_dir {
             if !dir.join("index.html").is_file() {
@@ -1278,7 +1289,7 @@ impl Config {
             push_gateway_delivery_url,
             push_gateway_timeout,
             join_policy,
-            dntls_introducer_url,
+            dntls_admission,
             admin,
             web_dir,
             serve_git_web_gui,
@@ -1395,6 +1406,11 @@ mod tests {
         assert!(
             !config.serve_git_web_gui,
             "serve_git_web_gui should default to false"
+        );
+        assert_eq!(
+            config.dntls_admission,
+            DntlsAdmission::Off,
+            "dntls_admission should default to off"
         );
         assert_eq!(
             config.media.s3_addressing_style,
@@ -2350,25 +2366,31 @@ mod tests {
     }
 
     #[test]
-    fn dntls_introducer_url_accepts_http_urls_and_rejects_ws() {
+    fn dntls_admission_parses_modes_and_rejects_unknown() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        let previous = std::env::var("BUZZ_DNTLS_INTRODUCER_URL").ok();
-        std::env::set_var("BUZZ_DNTLS_INTRODUCER_URL", "http://127.0.0.1:8787/");
-        let config = Config::from_env().expect("config");
-        assert_eq!(
-            config.dntls_introducer_url.as_deref(),
-            Some("http://127.0.0.1:8787")
-        );
+        let previous = std::env::var("BUZZ_DNTLS_ADMISSION").ok();
 
-        std::env::set_var("BUZZ_DNTLS_INTRODUCER_URL", "ws://127.0.0.1:8787");
+        std::env::remove_var("BUZZ_DNTLS_ADMISSION");
+        let config = Config::from_env().expect("config");
+        assert_eq!(config.dntls_admission, DntlsAdmission::Off);
+
+        std::env::set_var("BUZZ_DNTLS_ADMISSION", "auto");
+        let config = Config::from_env().expect("config");
+        assert_eq!(config.dntls_admission, DntlsAdmission::Auto);
+
+        std::env::set_var("BUZZ_DNTLS_ADMISSION", "APPROVE");
+        let config = Config::from_env().expect("config");
+        assert_eq!(config.dntls_admission, DntlsAdmission::Approve);
+
+        std::env::set_var("BUZZ_DNTLS_ADMISSION", "nope");
         let result = Config::from_env();
-        std::env::remove_var("BUZZ_DNTLS_INTRODUCER_URL");
+        std::env::remove_var("BUZZ_DNTLS_ADMISSION");
         if let Some(value) = previous {
-            std::env::set_var("BUZZ_DNTLS_INTRODUCER_URL", value);
+            std::env::set_var("BUZZ_DNTLS_ADMISSION", value);
         }
         assert!(matches!(
             result,
-            Err(ConfigError::InvalidValue(ref msg)) if msg.contains("BUZZ_DNTLS_INTRODUCER_URL")
+            Err(ConfigError::InvalidValue(ref msg)) if msg.contains("BUZZ_DNTLS_ADMISSION")
         ));
     }
 

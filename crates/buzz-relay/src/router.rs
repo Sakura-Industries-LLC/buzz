@@ -121,11 +121,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(api::invites::accept_policy),
         )
         .route("/api/invites/claim", post(api::invites::claim_invite))
-        .route(
-            "/api/dntls/join/challenge",
-            post(api::dntls::join_challenge),
-        )
-        .route("/api/dntls/join", post(api::dntls::join))
         .route("/api/dntls/pending", get(api::dntls::pending))
         .route("/api/dntls/approve", post(api::dntls::approve))
         .route("/api/dntls/reject", post(api::dntls::reject))
@@ -363,6 +358,8 @@ async fn nip11_or_ws_handler(
         }
     };
 
+    let dntls_name = api::dntls::verified_name_from_upgrade(&state, &headers);
+
     let max_frame_bytes = state.config.max_frame_bytes;
     match WebSocketUpgrade::from_request(req, &state).await {
         Ok(ws) => {
@@ -376,7 +373,7 @@ async fn nip11_or_ws_handler(
                 return (StatusCode::SERVICE_UNAVAILABLE, "relay restarting").into_response();
             }
             limit_relay_websocket(ws, max_frame_bytes)
-                .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant))
+                .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant, dntls_name))
                 .into_response()
         }
         Err(_) => {

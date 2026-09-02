@@ -213,6 +213,20 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 }
             }
 
+            // Gateway-verified DNTLS name (X-DNTLS-Name) is bound at AUTH so
+            // auto-admit can run before the membership gate.
+            if !crate::api::dntls::apply_auth_admission(&state, &conn, &pubkey.to_hex()).await {
+                metrics::counter!("buzz_auth_failures_total", "reason" => "dntls_admission")
+                    .increment(1);
+                *conn.auth_state.write().await = AuthState::Failed;
+                conn.send(RelayMessage::ok(
+                    &event_id_hex,
+                    false,
+                    "error: internal error applying DNTLS admission",
+                ));
+                return;
+            }
+
             // Relay membership gate — uses the shared helper with NIP-OA fallback.
             let nip_oa_owner = match crate::api::relay_members::enforce_relay_membership(
                 &state,
