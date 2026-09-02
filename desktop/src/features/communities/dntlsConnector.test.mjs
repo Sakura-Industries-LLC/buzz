@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { dntlsCommunityName } from "./dntlsConnector.ts";
+import {
+  dntlsCommunityName,
+  needsCredentialsImport,
+} from "./dntlsConnector.ts";
 
 test("normalizes exact DNTLS community names", () => {
   assert.equal(
@@ -16,4 +19,10 @@ test("normalizes exact DNTLS community names", () => {
   ]) {
     assert.equal(dntlsCommunityName(value), null, value);
   }
+});
+
+test("prompts for credentials only when none are stored", () => {
+  assert.equal(needsCredentialsImport({ name: null }), true);
+  assert.equal(needsCredentialsImport({ name: "" }), true);
+  assert.equal(needsCredentialsImport({ name: "demo-alice.dntls" }), false);
 });

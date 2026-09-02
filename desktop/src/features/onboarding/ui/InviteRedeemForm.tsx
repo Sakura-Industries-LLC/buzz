@@ -15,6 +15,7 @@ import {
 import { normalizeRelayUrl } from "@/features/communities/relayProbe";
 import {
   dntlsCommunityName,
+  ensureDntlsCredentials,
   startDntlsConnector,
 } from "@/features/communities/dntlsConnector";
 import { cn } from "@/shared/lib/cn";
@@ -97,9 +98,8 @@ export function InviteRedeemForm({
     [inviteInput],
   );
   const dntlsName = React.useMemo(
-    () =>
-      onConnect && isAddCommunity ? dntlsCommunityName(inviteInput) : null,
-    [inviteInput, isAddCommunity, onConnect],
+    () => (onConnect ? dntlsCommunityName(inviteInput) : null),
+    [inviteInput, onConnect],
   );
   const normalizedRelayUrl = React.useMemo(
     () =>
@@ -165,6 +165,7 @@ export function InviteRedeemForm({
         setPolicyError(null);
         setIsLoadingPolicy(true);
         try {
+          if (dntlsName && !(await ensureDntlsCredentials())) return;
           const ready = dntlsName ? await startDntlsConnector(dntlsName) : null;
           const relayWsUrl = ready?.relayUrl ?? normalizedRelayUrl;
           if (!relayWsUrl) return;

@@ -170,7 +170,7 @@ _ensure-sidecar-stubs:
     set -euo pipefail
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     mkdir -p desktop/src-tauri/binaries
-    SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
+    SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz dntls-demo-buzz)
     if [[ "$TARGET" != *windows* ]]; then
         SIDECARS+=(buzz-backend-kubernetes)
     fi
@@ -273,6 +273,7 @@ desktop-release-build target="aarch64-apple-darwin":
     touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
     touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
     touch "desktop/src-tauri/binaries/buzz-$TARGET"
+    touch "desktop/src-tauri/binaries/dntls-demo-buzz-$TARGET"
     pnpm install
     cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
 
