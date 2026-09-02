@@ -20,6 +20,9 @@ pub(crate) const SUPPORTED_NIPS: &[u32] = &[1, 2, 10, 11, 16, 17, 23, 25, 29, 33
 /// to be verifiable by clients.
 pub(crate) const NIP_RELAY_MEMBERSHIP: u32 = 43;
 
+/// Buzz protocol capability advertised in NIP-11 `supported_extensions`.
+pub(crate) const BUZZ_EXTENSION: &str = "buzz";
+
 /// Relay information document served at `GET /` with `Accept: application/nostr+json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayInfo {
@@ -189,7 +192,7 @@ impl RelayInfo {
             supported_nips.push(NIP_RELAY_MEMBERSHIP);
         }
 
-        let mut supported_extensions = vec!["nip-er".to_string()];
+        let mut supported_extensions = vec![BUZZ_EXTENSION.to_string(), "nip-er".to_string()];
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
             GifDescriptor {
@@ -453,6 +456,17 @@ mod tests {
     fn build_advertises_buzz_repository_url() {
         let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
         assert_eq!(info.software, "https://github.com/block/buzz");
+    }
+
+    #[test]
+    fn build_advertises_buzz_capability() {
+        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
+
+        assert!(
+            info.supported_extensions
+                .expect("supported extensions")
+                .contains(&BUZZ_EXTENSION.to_string())
+        );
     }
 
     #[test]
