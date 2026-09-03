@@ -33,7 +33,7 @@ pub struct AppState {
     pub media_fetch_client: reqwest::Client,
     pub relay_url_override: Mutex<Option<String>>,
     /// DNTLS community host for NIP-42/NIP-98 signing. Transport may be a
-    /// loopback connector; the signed origin uses this host with no port.
+    /// loopback connector; signed tags use `wss://` / `https://` this host.
     pub canonical_relay_host: Mutex<Option<String>>,
     pub workspace_apply_lock: Arc<AsyncMutex<()>>,
     pub workspace_apply_generation: AtomicU64,

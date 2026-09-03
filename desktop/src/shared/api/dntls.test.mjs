@@ -115,7 +115,7 @@ test("fetchDntlsNames signs the DNTLS origin while fetching the loopback URL", a
       if (command === "canonical_auth_url") {
         return args.url.replace(
           "http://127.0.0.1:63330",
-          "http://buzzdemo.dntls",
+          "https://buzzdemo.dntls",
         );
       }
       if (command === "sign_event") {
@@ -146,7 +146,7 @@ test("fetchDntlsNames signs the DNTLS origin while fetching the loopback URL", a
     assert.equal(signed[0].tags[0][0], "u");
     assert.equal(
       signed[0].tags[0][1],
-      "http://buzzdemo.dntls/api/dntls/names",
+      "https://buzzdemo.dntls/api/dntls/names",
     );
   } finally {
     teardownTauriStubs();

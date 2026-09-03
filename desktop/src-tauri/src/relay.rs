@@ -100,10 +100,8 @@ pub fn relay_http_base_url(relay_url: &str) -> String {
 /// Host used in NIP-42 `relay` tags and NIP-98 `u` tags for a DNTLS community.
 ///
 /// Transport may be a loopback connector URL (`ws://127.0.0.1:port`). The
-/// signed authority is the community name with no port, matching
-/// `nip42_expected_relay_url` / `nip98_expected_url` which key off the
-/// tenant `Host` header. Ordinary communities leave this unset and sign the
-/// transport URL unchanged.
+/// signed authority is the community name with no port. Ordinary communities
+/// leave this unset and sign the transport URL unchanged.
 pub(crate) fn workspace_canonical_host(state: &AppState) -> Option<String> {
     state
         .canonical_relay_host
@@ -125,12 +123,13 @@ pub fn canonical_dntls_host(dntls_name: &str) -> Option<String> {
     }
 }
 
-/// Rewrite `transport_url` onto `canonical_host`, keeping scheme/path/query.
+/// Rewrite `transport_url` onto the DNTLS community origin.
 ///
-/// Scheme is preserved so a local `RELAY_URL=ws://…` deployment expects
-/// `ws://name` / `http://name/…` while a `wss://` deployment expects
-/// `wss://` / `https://`. The port is dropped because the community origin
-/// has none. `None` returns `transport_url` unchanged.
+/// The loopback connector hop is not the relay's transport. A DNTLS community
+/// is always reached through TLS at the gateway, so AUTH tags are
+/// `wss://<name>` and NIP-98 `u` tags are `https://<name>/…`, independent of
+/// the connector's `ws://127.0.0.1:port` scheme. Path and query are preserved;
+/// the port is dropped. `None` returns `transport_url` unchanged.
 pub fn rewrite_url_for_auth(transport_url: &str, canonical_host: Option<&str>) -> String {
     let Some(host) = canonical_host
         .map(str::trim)
@@ -147,8 +146,14 @@ pub fn rewrite_url_for_auth(transport_url: &str, canonical_host: Option<&str>) -
     let Some((scheme, rest)) = split_scheme(trimmed) else {
         return transport_url.to_string();
     };
-    format!("{scheme}://{host}{}", path_query_of(rest))
+    let auth_scheme = match scheme {
+        "http" | "https" => "https",
+        "ws" | "wss" => "wss",
+        other => other,
+    };
+    format!("{auth_scheme}://{host}{}", path_query_of(rest))
 }
+
 
 /// Sign-tag URL for `transport_url` under the active workspace's DNTLS host.
 pub fn auth_url_for_transport(state: &AppState, transport_url: &str) -> String {

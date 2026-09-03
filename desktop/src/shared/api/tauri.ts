@@ -373,8 +373,8 @@ export function getRelayHttpUrl(): Promise<string> {
 }
 
 /** URL used in NIP-98 `u` tags and NIP-42 `relay` tags.
- *  Transport may be a loopback connector; this rewrites onto the DNTLS
- *  community host when one is applied. */
+ *  Transport may be a loopback connector; DNTLS communities rewrite onto
+ *  `https://<name>` / `wss://<name>` regardless of the loopback scheme. */
 export function canonicalAuthUrl(url: string): Promise<string> {
   return invokeTauri<string>("canonical_auth_url", { url });
 }
