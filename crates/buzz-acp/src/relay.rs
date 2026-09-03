@@ -290,7 +290,8 @@ impl RestClient {
         use base64::Engine;
         use sha2::{Digest, Sha256};
 
-        let u_tag = Tag::parse(["u", url])
+        let url = nip98_signed_url(url, configured_relay_auth_url().as_deref());
+        let u_tag = Tag::parse(["u", &url])
             .map_err(|e| RelayError::Http(format!("NIP-98 tag error: {e}")))?;
         let method_tag = Tag::parse(["method", method])
             .map_err(|e| RelayError::Http(format!("NIP-98 tag error: {e}")))?;
@@ -3515,6 +3516,75 @@ fn extract_h_tag_uuid(event: &nostr::Event) -> Option<Uuid> {
     })
 }
 
+/// Env var carrying the NIP-42/NIP-98 origin when transport is a loopback connector.
+const RELAY_AUTH_URL_ENV: &str = "BUZZ_RELAY_AUTH_URL";
+
+fn configured_relay_auth_url() -> Option<String> {
+    std::env::var(RELAY_AUTH_URL_ENV)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// NIP-42 `relay` tag: canonical origin when set, otherwise the transport URL.
+pub(crate) fn nip42_relay_tag<'a>(transport_url: &'a str, auth_url: Option<&'a str>) -> &'a str {
+    match auth_url.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(url) => url,
+        None => transport_url,
+    }
+}
+
+fn path_query_from_url(url: &str) -> &str {
+    let rest = match url.find("://") {
+        Some(i) => &url[i + 3..],
+        None => url,
+    };
+    match rest.find(|c: char| c == '/' || c == '?' || c == '#') {
+        Some(i) => &rest[i..],
+        None => "",
+    }
+}
+
+/// Rewrite a NIP-98 request URL onto the canonical origin when one is set.
+pub(crate) fn nip98_signed_url(request_url: &str, auth_origin: Option<&str>) -> String {
+    let Some(origin) = auth_origin.map(str::trim).filter(|s| !s.is_empty()) else {
+        return request_url.to_string();
+    };
+    let origin_http = origin
+        .replace("wss://", "https://")
+        .replace("ws://", "http://")
+        .trim_end_matches('/')
+        .to_string();
+    format!("{origin_http}{}", path_query_from_url(request_url))
+}
+
+/// Build a NIP-42 AUTH event, signing `auth_url` when present.
+pub(crate) fn build_nip42_auth_event(
+    challenge: &str,
+    transport_url: &str,
+    auth_url: Option<&str>,
+    keys: &Keys,
+    auth_tag: Option<&nostr::Tag>,
+) -> Result<Event, RelayError> {
+    let relay_url = nip42_relay_tag(transport_url, auth_url);
+    let relay_nostr_url = RelayUrl::parse(relay_url)
+        .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
+    if let Some(tag) = auth_tag {
+        let tags = vec![
+            nostr::Tag::parse(["relay", relay_url])
+                .map_err(|e| RelayError::Http(format!("tag parse error: {e}")))?,
+            nostr::Tag::parse(["challenge", challenge])
+                .map_err(|e| RelayError::Http(format!("tag parse error: {e}")))?,
+            tag.clone(),
+        ];
+        Ok(EventBuilder::new(nostr::Kind::Authentication, "")
+            .tags(tags)
+            .sign_with_keys(keys)?)
+    } else {
+        Ok(EventBuilder::auth(challenge, relay_nostr_url).sign_with_keys(keys)?)
+    }
+}
+
 /// Build and send a NIP-42 AUTH response event.
 ///
 /// If `auth_tag` is provided (NIP-OA owner attestation), it is included in the
@@ -3526,24 +3596,14 @@ async fn send_auth_response(
     keys: &Keys,
     auth_tag: Option<&nostr::Tag>,
 ) -> Result<(), RelayError> {
-    let relay_nostr_url = RelayUrl::parse(relay_url)
-        .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
+    let auth_event = build_nip42_auth_event(
+        challenge,
+        relay_url,
+        configured_relay_auth_url().as_deref(),
+        keys,
+        auth_tag,
+    )?;
 
-    let auth_event = if let Some(tag) = auth_tag {
-        // Cannot use EventBuilder::auth() shortcut — it doesn't accept extra tags.
-        let tags = vec![
-            nostr::Tag::parse(["relay", relay_url])
-                .map_err(|e| RelayError::Http(format!("tag parse error: {e}")))?,
-            nostr::Tag::parse(["challenge", challenge])
-                .map_err(|e| RelayError::Http(format!("tag parse error: {e}")))?,
-            tag.clone(),
-        ];
-        EventBuilder::new(nostr::Kind::Authentication, "")
-            .tags(tags)
-            .sign_with_keys(keys)?
-    } else {
-        EventBuilder::auth(challenge, relay_nostr_url).sign_with_keys(keys)?
-    };
 
     let auth_msg = serde_json::to_string(&json!(["AUTH", auth_event]))?;
     ws_send_timeout(ws, Message::Text(auth_msg.into()), WS_SEND_TIMEOUT_SECS).await?;
@@ -4123,6 +4183,55 @@ mod tests {
             "https://relay.example.com:4000/ws"
         );
     }
+
+    fn auth_relay_tag(event: &Event) -> String {
+        event
+            .tags
+            .find(nostr::TagKind::Relay)
+            .and_then(|tag| tag.content().map(str::to_string))
+            .expect("AUTH event must carry a relay tag")
+    }
+
+    #[test]
+    fn auth_uses_override_url_when_present() {
+        let keys = Keys::generate();
+        let event = build_nip42_auth_event(
+            "challenge",
+            "ws://127.0.0.1:60578",
+            Some("wss://buzz.dntls"),
+            &keys,
+            None,
+        )
+        .expect("sign AUTH");
+        assert_eq!(auth_relay_tag(&event), "wss://buzz.dntls");
+    }
+
+    #[test]
+    fn auth_falls_back_to_transport_without_override() {
+        let keys = Keys::generate();
+        let event = build_nip42_auth_event(
+            "challenge",
+            "ws://127.0.0.1:60578",
+            None,
+            &keys,
+            None,
+        )
+        .expect("sign AUTH");
+        assert_eq!(auth_relay_tag(&event), "ws://127.0.0.1:60578");
+    }
+
+    #[test]
+    fn nip98_signed_url_rewrites_loopback_onto_dntls_origin() {
+        assert_eq!(
+            nip98_signed_url("http://127.0.0.1:60578/events", Some("wss://buzz.dntls")),
+            "https://buzz.dntls/events"
+        );
+        assert_eq!(
+            nip98_signed_url("http://127.0.0.1:60578/events", None),
+            "http://127.0.0.1:60578/events"
+        );
+    }
+
 
     #[test]
     fn channel_sub_id_format() {

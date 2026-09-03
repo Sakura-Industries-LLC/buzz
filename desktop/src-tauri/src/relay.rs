@@ -160,6 +160,20 @@ pub fn auth_url_for_transport(state: &AppState, transport_url: &str) -> String {
     rewrite_url_for_auth(transport_url, workspace_canonical_host(state).as_deref())
 }
 
+/// Canonical origin env for a managed-agent child (`BUZZ_RELAY_AUTH_URL`).
+///
+/// `BUZZ_RELAY_URL` stays the loopback transport. This returns `Some` only
+/// when a DNTLS community origin differs from that transport, so ordinary
+/// communities do not set the override.
+pub fn managed_agent_auth_url_env(
+    transport_url: &str,
+    canonical_host: Option<&str>,
+) -> Option<String> {
+    let auth = rewrite_url_for_auth(transport_url, canonical_host);
+    (auth != transport_url).then_some(auth)
+}
+
+
 fn strip_url_scheme(value: &str) -> &str {
     value
         .strip_prefix("wss://")

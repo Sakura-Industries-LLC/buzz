@@ -191,9 +191,13 @@ fn reserved_keys_include_code_execution_surface() {
 #[test]
 fn reserved_keys_include_relay_url() {
     // Overriding the relay URL could redirect the agent to an
-    // attacker-controlled relay.
+    // attacker-controlled relay. Same for the signed AUTH origin.
     assert!(is_reserved_env_key("BUZZ_RELAY_URL"));
-    let agent = map(&[("BUZZ_RELAY_URL", "ws://attacker.example")]);
+    assert!(is_reserved_env_key("BUZZ_RELAY_AUTH_URL"));
+    let agent = map(&[
+        ("BUZZ_RELAY_URL", "ws://attacker.example"),
+        ("BUZZ_RELAY_AUTH_URL", "wss://attacker.example"),
+    ]);
     let merged = merged_user_env(&BTreeMap::new(), &agent);
     assert!(merged.is_empty());
 }

@@ -79,12 +79,15 @@ const PASSTHROUGH_ENV: &[&str] = &[
     "SSL_CERT_DIR",
     // Buzz identity — dev-mcp writes NOSTR_PRIVATE_KEY to a keyfile then
     // removes it from its own env (children never see it). BUZZ_PRIVATE_KEY
-    // and BUZZ_RELAY_URL are kept for the buzz CLI. BUZZ_AUTH_TAG is a
-    // non-secret signed ownership attestation needed by portable owner-scoped
-    // CLI operations; MCP subprocesses are trusted like the agent runtime.
+    // and BUZZ_RELAY_URL are kept for the buzz CLI. BUZZ_RELAY_AUTH_URL is
+    // the signed NIP-42/NIP-98 origin when transport is a loopback connector.
+    // BUZZ_AUTH_TAG is a non-secret signed ownership attestation needed by
+    // portable owner-scoped CLI operations; MCP subprocesses are trusted
+    // like the agent runtime.
     "NOSTR_PRIVATE_KEY",
     "BUZZ_PRIVATE_KEY",
     "BUZZ_RELAY_URL",
+    "BUZZ_RELAY_AUTH_URL",
     "BUZZ_AUTH_TAG",
     // Agent display name — dev-mcp uses it as the git author name. On the
     // Desktop path this arrives via the wire `mcpServers[].env` declaration
@@ -1055,6 +1058,12 @@ mod content_tests {
     fn passthrough_includes_buzz_owner_attestation() {
         assert!(PASSTHROUGH_ENV.contains(&"BUZZ_AUTH_TAG"));
     }
+
+    #[test]
+    fn passthrough_includes_relay_auth_origin() {
+        assert!(PASSTHROUGH_ENV.contains(&"BUZZ_RELAY_AUTH_URL"));
+    }
+
 
     #[test]
     fn passthrough_carries_proxy_configuration_to_tools() {
