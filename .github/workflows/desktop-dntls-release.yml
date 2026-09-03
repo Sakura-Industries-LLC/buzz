@@ -1,0 +1,325 @@
+name: Desktop DNTLS Release
+
+# Publishes the Buzz DNTLS client (bundle id net.dntls.buzz) from this fork.
+# Upstream release.yml is tied to Block's codesign infrastructure, so this
+# workflow signs and notarizes with the org's Apple credentials instead and
+# lets tauri-action upload the bundles.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, for example 0.1.0
+        required: true
+        type: string
+  push:
+    tags:
+      - 'desktop-dntls-v[0-9]*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-dntls-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Connector release bundled as the dntls-demo-buzz sidecar. Pinned so
+  # rebuilding a tag ships the same binary.
+  DNTLS_DEMO_BUZZ_VERSION: '0.1.1'
+  NODE_VERSION: '24.14.1'
+  PNPM_VERSION: '11.4.0'
+
+jobs:
+  # One release object, created before the platform jobs so they never race to
+  # create it and every job builds the same tagged source.
+  setup:
+    name: Setup
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == 'tag' ]]; then
+            version="${GITHUB_REF_NAME#desktop-dntls-v}"
+          else
+            version="$INPUT_VERSION"
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid version '$version'. Expected semver, for example 0.1.0."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=desktop-dntls-v${version}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; the platform jobs will upload into it."
+            exit 0
+          fi
+          notes="$(mktemp)"
+          cat > "$notes" <<EOF
+          Buzz DNTLS ${VERSION}: a Buzz desktop client that joins communities by
+          their DNTLS name.
+
+          Downloads: macOS \`.dmg\` for Apple silicon and Intel, Linux
+          \`.AppImage\` or \`.deb\`, Windows setup \`.exe\`. The macOS builds are
+          signed and notarized; the Windows installer is unsigned.
+
+          \`latest.json\` serves the in-app updater.
+          EOF
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "Buzz DNTLS ${VERSION}" \
+            --notes-file "$notes"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: setup
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            bundles: ''
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+            bundles: ''
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            bundles: '--bundles deb,appimage'
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            # WiX is unproven here; the NSIS installer is what upstream ships.
+            bundles: '--bundles nsis'
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.setup.outputs.version }}
+      # AppImage tooling is itself an AppImage and the runner has no FUSE.
+      APPIMAGE_EXTRACT_AND_RUN: '1'
+      # Some C dependencies still declare a pre-4.0 minimum, which the cmake on
+      # the runner images refuses without this.
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.setup.outputs.tag }}
+          persist-credentials: false
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            desktop-file-utils \
+            libasound2-dev \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            xdg-utils
+
+      # Pinned to the action's 1.95.0 branch, matching rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          # A writable dependency cache in a workflow that signs installers is a
+          # poisoning vector; pnpm install runs uncached below.
+          package-manager-cache: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install desktop dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Patch version
+        run: |
+          set -euo pipefail
+          cd desktop
+          node scripts/set-version-from-tag.mjs "$VERSION"
+          cd src-tauri
+          cargo update --workspace
+
+      # tauri.conf.json holds the updater key and endpoint. The Rust side gates
+      # the updater on these two variables being present at build time
+      # (desktop/src-tauri/build.rs), so derive them from the config rather than
+      # restating them here.
+      - name: Generate release config
+        run: |
+          set -euo pipefail
+          config='desktop/src-tauri/tauri.conf.json'
+          BUZZ_UPDATER_PUBLIC_KEY="$(jq -er '.plugins.updater.pubkey' "$config")"
+          BUZZ_UPDATER_ENDPOINT="$(jq -er '.plugins.updater.endpoints[0]' "$config")"
+          export BUZZ_UPDATER_PUBLIC_KEY BUZZ_UPDATER_ENDPOINT
+          {
+            echo "BUZZ_UPDATER_PUBLIC_KEY=$BUZZ_UPDATER_PUBLIC_KEY"
+            echo "BUZZ_UPDATER_ENDPOINT=$BUZZ_UPDATER_ENDPOINT"
+          } >> "$GITHUB_ENV"
+          cd desktop && node scripts/build-release-config.mjs
+
+      - name: Build sidecars
+        run: |
+          set -euo pipefail
+          packages=(-p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli)
+          # buzz-backend-kubernetes is not part of the Windows bundle.
+          if [[ "$TARGET" != *windows* ]]; then
+            packages+=(-p buzz-backend-kubernetes)
+          fi
+          cargo build --release --target "$TARGET" "${packages[@]}"
+          ./scripts/bundle-sidecars.sh "$TARGET"
+
+      - name: Fetch the DNTLS connector sidecar
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: desktop/scripts/fetch-dntls-connector.sh "$TARGET"
+
+      # notarytool reads the App Store Connect key from a file. The secret holds
+      # the .p8 base64-encoded, the way GoReleaser wants it in the sibling repos.
+      - name: Stage the notary API key
+        id: notary
+        if: runner.os == 'macOS'
+        env:
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key_path="${RUNNER_TEMP}/notary-key.p8"
+          if [[ "$MACOS_NOTARY_KEY" == -----BEGIN* ]]; then
+            printf '%s\n' "$MACOS_NOTARY_KEY" > "$key_path"
+          else
+            printf '%s' "$MACOS_NOTARY_KEY" | base64 -d > "$key_path"
+          fi
+          openssl pkey -in "$key_path" -noout
+          echo "key_path=$key_path" >> "$GITHUB_OUTPUT"
+
+      # The Apple variables are read only by the macOS bundler; Linux and
+      # Windows ignore them. Windows installers ship unsigned.
+      - name: Build and upload the bundles
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          APPLE_CERTIFICATE: ${{ secrets.MACOS_SIGN_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+          APPLE_API_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          APPLE_API_KEY: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          APPLE_API_KEY_PATH: ${{ steps.notary.outputs.key_path }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: desktop
+          tagName: ${{ needs.setup.outputs.tag }}
+          releaseDraft: false
+          prerelease: false
+          # latest.json is assembled once, after every platform has uploaded,
+          # so the matrix jobs cannot overwrite each other's entries.
+          uploadUpdaterJson: false
+          retryAttempts: 2
+          args: --target ${{ matrix.target }} ${{ matrix.bundles }} --config src-tauri/tauri.release.conf.json
+
+      - name: Remove the notary API key
+        if: always() && steps.notary.outputs.key_path != ''
+        env:
+          KEY_PATH: ${{ steps.notary.outputs.key_path }}
+        run: rm -f "$KEY_PATH"
+
+      - name: Verify the signed app
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          app="desktop/src-tauri/target/${TARGET}/release/bundle/macos/Buzz DNTLS.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          spctl --assess --type execute --verbose=4 "$app"
+          xcrun stapler validate "$app"
+
+  # Tauri's updater reads one manifest per release. Assembling it here, from the
+  # signatures the platform jobs uploaded, keeps all four platforms in the file.
+  updater-manifest:
+    name: Updater manifest
+    needs: [setup, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Assemble and upload latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.setup.outputs.tag }}
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          gh release download "$TAG" --dir "$work" --pattern '*.sig'
+
+          manifest="$(jq -n --arg version "$VERSION" \
+            '{version: $version, notes: "", pub_date: (now | todate), platforms: {}}')"
+
+          for sig in "$work"/*.sig; do
+            bundle="$(basename "$sig" .sig)"
+            case "$bundle" in
+              *_aarch64.app.tar.gz) platform='darwin-aarch64' ;;
+              *_x64.app.tar.gz) platform='darwin-x86_64' ;;
+              *.AppImage | *.AppImage.tar.gz) platform='linux-x86_64' ;;
+              *.exe | *.nsis.zip) platform='windows-x86_64' ;;
+              *)
+                echo "Ignoring signature for $bundle"
+                continue
+                ;;
+            esac
+            manifest="$(jq \
+              --arg platform "$platform" \
+              --arg signature "$(cat "$sig")" \
+              --arg url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${bundle}" \
+              '.platforms[$platform] = {signature: $signature, url: $url}' \
+              <<< "$manifest")"
+          done
+
+          missing="$(jq -r \
+            '["darwin-aarch64", "darwin-x86_64", "linux-x86_64", "windows-x86_64"]
+             - (.platforms | keys) | join(", ")' <<< "$manifest")"
+          if [[ -n "$missing" ]]; then
+            echo "::error::latest.json is missing platforms: ${missing}"
+            exit 1
+          fi
+
+          printf '%s\n' "$manifest" > "$work/latest.json"
+          gh release upload "$TAG" "$work/latest.json" --clobber
