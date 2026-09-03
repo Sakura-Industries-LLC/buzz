@@ -299,9 +299,26 @@ pub async fn publish_event(
     auth_tag: Option<&Tag>,
     timeout_secs: u64,
 ) -> Result<OkResponse, WsClientError> {
+    publish_event_with_origin(relay_url, relay_url, event, keys, auth_tag, timeout_secs).await
+}
+
+/// Like [`publish_event`], but signs NIP-42 AUTH with `auth_url`.
+///
+/// `relay_url` is the WebSocket transport. `auth_url` is the relay identity
+/// the server checks (e.g. `wss://buzz.dntls` for a DNTLS community).
+pub async fn publish_event_with_origin(
+    relay_url: &str,
+    auth_url: &str,
+    event: Event,
+    keys: &Keys,
+    auth_tag: Option<&Tag>,
+    timeout_secs: u64,
+) -> Result<OkResponse, WsClientError> {
     let result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
-        let mut conn = NostrWsConnection::connect(relay_url).await?;
-        conn.authenticate(keys, auth_tag).await?;
+        let mut conn = NostrWsConnection::connect_authenticated_with_origin(
+            relay_url, auth_url, keys, auth_tag,
+        )
+        .await?;
         let ok = conn.send_event(event).await?;
         let _ = conn.disconnect().await;
         Ok::<_, WsClientError>(ok)

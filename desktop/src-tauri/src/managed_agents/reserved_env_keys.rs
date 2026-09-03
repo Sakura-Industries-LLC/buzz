@@ -34,8 +34,10 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_PRIVATE_KEY",
     "BUZZ_ACP_API_TOKEN",
     // Relay URL: overriding would let a malicious config redirect the
-    // agent to an attacker-controlled relay.
+    // agent to an attacker-controlled relay. The AUTH origin is the same
+    // class of control: forging it would make NIP-42/NIP-98 tags lie.
     "BUZZ_RELAY_URL",
+    "BUZZ_RELAY_AUTH_URL",
     // Code-execution surface: overriding would let the user run arbitrary
     // binaries/args as the agent process.
     "BUZZ_ACP_AGENT_COMMAND",

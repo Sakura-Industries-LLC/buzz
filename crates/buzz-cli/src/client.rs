@@ -87,8 +87,9 @@ fn sign_nip98(
     url: &str,
     body: Option<&[u8]>,
 ) -> Result<String, CliError> {
+    let url = nip98_signed_url(url, configured_relay_auth_url().as_deref());
     let mut tags = vec![
-        Tag::parse(["u", url]).map_err(|e| CliError::Other(format!("tag error: {e}")))?,
+        Tag::parse(["u", &url]).map_err(|e| CliError::Other(format!("tag error: {e}")))?,
         Tag::parse(["method", method]).map_err(|e| CliError::Other(format!("tag error: {e}")))?,
         // Nonce prevents replay rejection for rapid-fire requests with identical bodies.
         Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()])
@@ -108,6 +109,38 @@ fn sign_nip98(
     let json = event.as_json();
     Ok(format!("Nostr {}", B64.encode(json.as_bytes())))
 }
+
+fn configured_relay_auth_url() -> Option<String> {
+    std::env::var("BUZZ_RELAY_AUTH_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn path_query_from_url(url: &str) -> &str {
+    let rest = match url.find("://") {
+        Some(i) => &url[i + 3..],
+        None => url,
+    };
+    match rest.find(|c: char| c == '/' || c == '?' || c == '#') {
+        Some(i) => &rest[i..],
+        None => "",
+    }
+}
+
+/// Rewrite a NIP-98 request URL onto the canonical origin when one is set.
+fn nip98_signed_url(request_url: &str, auth_origin: Option<&str>) -> String {
+    let Some(origin) = auth_origin.map(str::trim).filter(|s| !s.is_empty()) else {
+        return request_url.to_string();
+    };
+    let origin_http = origin
+        .replace("wss://", "https://")
+        .replace("ws://", "http://")
+        .trim_end_matches('/')
+        .to_string();
+    format!("{origin_http}{}", path_query_from_url(request_url))
+}
+
 
 fn relay_server_tag(relay_url: &str) -> Option<String> {
     let authority = buzz_core::tenant::relay_url_authority(relay_url);
@@ -1093,14 +1126,22 @@ impl BuzzClient {
     /// EVENT send, OK wait, and graceful close.
     pub async fn publish_ephemeral_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let ws_url = to_ws_url(&self.relay_url);
+        let auth_url = configured_relay_auth_url().unwrap_or_else(|| ws_url.clone());
         // Hard cap — inner wait ceilings sum to 70 s; connect time and network RTT are
         // additional overhead absorbed by this budget.
         // See buzz_ws_client::{AUTH_CHALLENGE_TIMEOUT_SECS, AUTH_OK_TIMEOUT_SECS,
         // PUBLISH_OK_TIMEOUT_SECS} for the inner ceilings.
-        let ok =
-            buzz_ws_client::publish_event(&ws_url, event, &self.keys, self.auth_tag.as_ref(), 75)
-                .await
-                .map_err(|e| CliError::Other(e.to_string()))?;
+        let ok = buzz_ws_client::publish_event_with_origin(
+            &ws_url,
+            &auth_url,
+            event,
+            &self.keys,
+            self.auth_tag.as_ref(),
+            75,
+        )
+        .await
+        .map_err(|e| CliError::Other(e.to_string()))?;
+
 
         if !ok.accepted {
             return Err(CliError::Relay {
@@ -2329,9 +2370,21 @@ mod retry_policy_tests {
 mod tests {
     use super::{
         advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
-        normalize_events, BuzzClient,
+        nip98_signed_url, normalize_events, BuzzClient,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn nip98_signed_url_uses_auth_origin_override() {
+        assert_eq!(
+            nip98_signed_url("http://127.0.0.1:60578/events", Some("wss://buzz.dntls")),
+            "https://buzz.dntls/events"
+        );
+        assert_eq!(
+            nip98_signed_url("http://127.0.0.1:60578/query", None),
+            "http://127.0.0.1:60578/query"
+        );
+    }
 
     #[test]
     fn normalize_events_preserves_the_complete_signed_event_shape() {

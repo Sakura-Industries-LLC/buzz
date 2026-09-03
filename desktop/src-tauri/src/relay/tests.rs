@@ -3,8 +3,8 @@
 
 use super::{
     build_profile_event, classify_intercepted_response, effective_agent_relay_url,
-    extract_retry_in_hint, parse_command_response, relay_http_base_url, rewrite_url_for_auth,
-    MALFORMED_RESPONSE_MESSAGE,
+    extract_retry_in_hint, managed_agent_auth_url_env, parse_command_response, relay_http_base_url,
+    rewrite_url_for_auth, MALFORMED_RESPONSE_MESSAGE,
 };
 use serde::Deserialize;
 
@@ -239,6 +239,26 @@ fn ordinary_community_leaves_transport_url_unchanged() {
     assert_eq!(
         rewrite_url_for_auth("ws://127.0.0.1:3000", None),
         "ws://127.0.0.1:3000"
+    );
+}
+
+#[test]
+fn managed_agent_spawn_env_sets_dntls_auth_origin() {
+    assert_eq!(
+        managed_agent_auth_url_env("ws://127.0.0.1:60578", Some("buzz.dntls")),
+        Some("wss://buzz.dntls".into())
+    );
+}
+
+#[test]
+fn managed_agent_spawn_env_omits_auth_url_for_ordinary_community() {
+    assert_eq!(
+        managed_agent_auth_url_env("ws://127.0.0.1:3000", None),
+        None
+    );
+    assert_eq!(
+        managed_agent_auth_url_env("wss://relay.example", Some("")),
+        None
     );
 }
 

@@ -5106,6 +5106,17 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                     });
                 }
             }
+            // Forward the signed relay origin so MCP/CLI NIP-98 tags match
+            // NIP-42 AUTH when transport is a loopback connector.
+            if let Ok(auth_url) = std::env::var("BUZZ_RELAY_AUTH_URL") {
+                if !auth_url.is_empty() {
+                    env.push(EnvVar {
+                        name: "BUZZ_RELAY_AUTH_URL".into(),
+                        value: auth_url,
+                    });
+                }
+            }
+
             // Forward the agent's display name so dev-mcp can use it as the git
             // author name instead of the raw npub. Read from the process env
             // rather than Config: this is a pass-through of a contract owned

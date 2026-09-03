@@ -532,6 +532,18 @@ pub fn spawn_agent_child(
     command.env("RUST_LOG", child_rust_log_filter());
     command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
+    {
+        use tauri::Manager;
+        let state = app.state::<crate::app_state::AppState>();
+        if let Some(auth_url) = crate::relay::managed_agent_auth_url_env(
+            &effective_relay_url,
+            crate::relay::workspace_canonical_host(&state).as_deref(),
+        ) {
+            command.env("BUZZ_RELAY_AUTH_URL", auth_url);
+        } else {
+            command.env_remove("BUZZ_RELAY_AUTH_URL");
+        }
+    }
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_IDLE_POOL_SLEEP", idle_pool_sleep_env(lazy));
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
