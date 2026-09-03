@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
     stream
         .write_all(
             format!(
-                "GET / HTTP/1.1\r\nHost: {community}\r\nAccept: application/nostr+json\r\nConnection: close\r\n\r\n"
+                "GET / HTTP/1.1\r\nHost: 127.0.0.1:9\r\nAccept: application/nostr+json\r\nConnection: close\r\n\r\n"
             )
             .as_bytes(),
         )
@@ -83,8 +83,8 @@ async fn main() -> anyhow::Result<()> {
     println!("NIP-11 status line: {}", head.lines().next().unwrap_or(""));
     let doc: serde_json::Value = serde_json::from_str(json.trim())?;
     println!(
-        "NIP-11 name={} pubkey={} supported_nips={}",
-        doc["name"], doc["pubkey"], doc["supported_nips"]
+        "NIP-11 name={} self={} supported_extensions={}",
+        doc["name"], doc["self"], doc["supported_extensions"]
     );
 
     // 2. NIP-42 AUTH over WebSocket on a second authenticated connection.

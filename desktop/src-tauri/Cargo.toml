@@ -102,6 +102,11 @@ percent-encoding = "2"
 reqwest = { version = "0.13", features = ["json", "query", "stream", "blocking"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 url = "2"
+# Native DNTLS community discovery and mutual TLS (src/dntls_connector.rs).
+# Consumed from git until the SDK is published on crates.io.
+dntls-testnet-sdk = { git = "https://github.com/Sakura-Industries-LLC/dntls-public", rev = "d918c798f7aa1173a9ff06e3ad4f8c1ba16ab09d" }
+tokio-rustls = { version = "0.26", default-features = false }
+time = { version = "0.3", default-features = false }
 buzz_core_pkg = { package = "buzz-core", path = "../../crates/buzz-core" }
 buzz_persona_pkg = { package = "buzz-persona", path = "../../crates/buzz-persona" }
 buzz_sdk_pkg = { package = "buzz-sdk", path = "../../crates/buzz-sdk" }
@@ -157,3 +162,6 @@ tokio = { version = "1", features = ["test-util"] }
 # The relay's media validation, so the snapshot-sharing tests can prove the
 # full export → sanitize → relay-accept → import contract end to end.
 buzz_media_pkg = { package = "buzz-media", path = "../../crates/buzz-media" }
+
+[patch."https://github.com/Sakura-Industries-LLC/dntls-public"]
+dntls-testnet-sdk = { path = "/tmp/dntls-sdk-patched" }

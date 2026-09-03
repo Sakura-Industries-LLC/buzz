@@ -1,44 +1,63 @@
+//! In-process DNTLS community connector.
+//!
+//! A DNTLS community is reached by its registered name alone: the name's
+//! verified record lists numeric `buzz_endpoints` and the relay's Nostr key.
+//! This module discovers the community with the DNTLS SDK, proves the relay's
+//! identity with mutual TLS, and exposes it to the webview and to managed
+//! agents as a Tauri-owned loopback listener. Every accepted loopback
+//! connection is spliced onto its own DNTLS TLS connection to the relay, so
+//! the existing Buzz client keeps speaking plain `ws://127.0.0.1:<port>`
+//! while the relay sees the user's DNTLS identity.
+//!
+//! The relay's DNTLS listener selects the community from the identity it
+//! presented, so no HTTP rewriting happens here.
+
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::{mpsc, Arc, Mutex};
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, State};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::TlsConnector;
 use url::{Host, Url};
+
+use dntls_sdk::portal::{BuzzEndpoint, RecordFields};
+use dntls_sdk::{identity, resolver, tls};
 
 use crate::dntls_credentials::{credentials_bundle_path, credentials_data_dir};
 
-const START_TIMEOUT: Duration = Duration::from_secs(30);
-const STDERR_TAIL_LINES: usize = 10;
-const CONNECTOR_BIN: &str = "dntls-demo-buzz";
+const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_ENDPOINTS: usize = 8;
+const MAX_NIP11_BYTES: usize = 64 * 1024;
+const BUZZ_EXTENSION: &str = "buzz";
 
-/// One running local connector and the URL assigned to its DNTLS community.
+/// One verified community and the loopback listener serving it.
 struct RunningConnector {
-    /// Child process kept alive for the desktop session.
-    child: Child,
-    /// Verified local relay projection returned by the connector.
+    /// Verified local relay projection returned to the webview.
     ready: ConnectorReady,
+    /// Accept loop; aborted when the connector table is dropped.
+    task: tauri::async_runtime::JoinHandle<()>,
 }
 
-/// Desktop-owned connector processes keyed by normalized DNTLS community name.
+/// Desktop-owned connectors keyed by normalized DNTLS community name.
 #[derive(Default)]
 pub(crate) struct DntlsConnectors {
-    /// Shared process table used by blocking command workers.
-    children: Arc<Mutex<HashMap<String, RunningConnector>>>,
+    /// Shared connector table.
+    running: Arc<Mutex<HashMap<String, RunningConnector>>>,
 }
 
 impl Drop for DntlsConnectors {
     fn drop(&mut self) {
-        let Ok(mut children) = self.children.lock() else {
+        let Ok(mut running) = self.running.lock() else {
             return;
         };
-        for connector in children.values_mut() {
-            let _ = connector.child.kill();
-            let _ = connector.child.wait();
+        for connector in running.values() {
+            connector.task.abort();
         }
-        children.clear();
+        running.clear();
     }
 }
 
@@ -52,7 +71,17 @@ pub(crate) struct ConnectorReady {
     relay_url: String,
 }
 
-/// Starts or reuses the local connector for one DNTLS community.
+/// Verified dial target for one community: the endpoint whose DNTLS identity
+/// and NIP-11 document both checked out.
+#[derive(Clone)]
+struct Verified {
+    /// Numeric relay address.
+    addr: SocketAddr,
+    /// SDK handshaker presenting the user's credentials.
+    handshaker: tls::Handshaker,
+}
+
+/// Starts or reuses the in-process connector for one DNTLS community.
 #[tauri::command]
 pub(crate) async fn start_dntls_connector(
     app: AppHandle,
@@ -60,228 +89,293 @@ pub(crate) async fn start_dntls_connector(
     state: State<'_, DntlsConnectors>,
 ) -> Result<ConnectorReady, String> {
     let community = normalize_dntls_name(&community)?;
-    let executable = resolve_connector_executable()?;
+    if let Some(ready) = lookup(&state.running, &community)? {
+        return Ok(ready);
+    }
     let credentials = credentials_bundle_path(&app)?;
     if !credentials.is_file() {
-        return Err(
-            "choose a DNTLS credentials file before adding this community".to_string(),
-        );
+        return Err("choose a DNTLS credentials file before adding this community".to_string());
     }
     let data_dir = credentials_data_dir(&app)?;
-    let children = Arc::clone(&state.children);
-    tauri::async_runtime::spawn_blocking(move || {
-        start_connector(children, community, executable, credentials, data_dir)
-    })
-    .await
-    .map_err(|error| format!("DNTLS connector task failed: {error}"))?
-}
 
-/// Starts one connector while serializing duplicate requests for the same name.
-fn start_connector(
-    children: Arc<Mutex<HashMap<String, RunningConnector>>>,
-    community: String,
-    executable: PathBuf,
-    credentials: PathBuf,
-    data_dir: PathBuf,
-) -> Result<ConnectorReady, String> {
-    let mut children = children
+    let (resolver, handshaker) = clients(&credentials, data_dir)?;
+    let verified = discover(&community, resolver, handshaker).await?;
+    let listener = TcpListener::bind((IpAddr::from([127, 0, 0, 1]), 0))
+        .await
+        .map_err(|error| format!("could not open the DNTLS loopback listener: {error}"))?;
+    let local = listener
+        .local_addr()
+        .map_err(|error| format!("DNTLS loopback listener address: {error}"))?;
+    let ready = validate_ready(
+        &community,
+        ConnectorReady {
+            community: community.clone(),
+            relay_url: format!("ws://{local}"),
+        },
+    )?;
+
+    let mut running = state
+        .running
         .lock()
         .map_err(|_| "DNTLS connector state is unavailable".to_string())?;
-    if let Some(running) = children.get_mut(&community) {
-        match running.child.try_wait() {
-            Ok(None) => return Ok(running.ready.clone()),
-            Ok(Some(_)) | Err(_) => {
-                children.remove(&community);
-            }
-        }
+    if let Some(existing) = running.get(&community) {
+        // A concurrent start won; serve that listener and drop ours.
+        return Ok(existing.ready.clone());
     }
-
-    let mut command = Command::new(&executable);
-    command
-        .arg("connect")
-        .arg(&community)
-        .arg("--credentials")
-        .arg(&credentials)
-        .arg("--data-dir")
-        .arg(&data_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    crate::util::configure_no_window(&mut command);
-    let mut child = command.spawn().map_err(|error| {
-        format!(
-            "could not start {CONNECTOR_BIN} at {}: {error}",
-            executable.display()
-        )
-    })?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "DNTLS connector did not expose its startup response".to_string())?;
-    let stderr_tail = match child.stderr.take() {
-        Some(stderr) => spawn_stderr_tail(stderr),
-        None => Arc::new(Mutex::new(VecDeque::new())),
-    };
-    let (sender, receiver) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        let result = BufReader::new(stdout)
-            .read_line(&mut line)
-            .map(|_| line)
-            .map_err(|error| error.to_string());
-        let _ = sender.send(result);
-    });
-
-    let ready = match receiver.recv_timeout(START_TIMEOUT) {
-        Ok(Ok(line)) => serde_json::from_str::<ConnectorReady>(&line)
-            .map_err(|error| format!("invalid DNTLS connector response: {error}")),
-        Ok(Err(error)) => Err(format!("could not read DNTLS connector response: {error}")),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            Err("DNTLS connector did not become ready within 30 seconds".to_string())
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Err("DNTLS connector exited before reporting readiness".to_string())
-        }
-    };
-    let ready = match ready.and_then(|value| validate_ready(&community, value)) {
-        Ok(value) => value,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(with_stderr(error, &stderr_tail));
-        }
-    };
-    children.insert(
+    let task = tauri::async_runtime::spawn(accept_loop(listener, community.clone(), verified));
+    running.insert(
         community,
         RunningConnector {
-            child,
             ready: ready.clone(),
+            task,
         },
     );
     Ok(ready)
 }
 
-/// Resolves the bundled `dntls-demo-buzz` sidecar the same way other desktop
-/// binaries are found: next to the app executable, then `src-tauri/binaries/`.
-pub(crate) fn resolve_connector_executable() -> Result<PathBuf, String> {
-    resolve_connector_executable_from(&connector_candidates())
+fn lookup(
+    running: &Mutex<HashMap<String, RunningConnector>>,
+    community: &str,
+) -> Result<Option<ConnectorReady>, String> {
+    let running = running
+        .lock()
+        .map_err(|_| "DNTLS connector state is unavailable".to_string())?;
+    Ok(running.get(community).map(|c| c.ready.clone()))
 }
 
-fn connector_candidates() -> Vec<PathBuf> {
-    let exe_name = connector_file_name(false);
-    let triple_name = connector_file_name(true);
-    let mut candidates = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            candidates.push(parent.join(&exe_name));
-            candidates.push(parent.join(&triple_name));
-        }
-    }
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries");
-    candidates.push(manifest.join(&triple_name));
-    candidates.push(manifest.join(&exe_name));
-    candidates
+/// Loads the stored credential bundle and builds the resolver client for
+/// record reads plus a handshaker that presents the bundle and verifies
+/// relays through that same resolver.
+fn clients(
+    bundle: &std::path::Path,
+    data_dir: std::path::PathBuf,
+) -> Result<(Arc<resolver::Client>, tls::Handshaker), String> {
+    let data = std::fs::read(bundle).map_err(|error| format!("read DNTLS credentials: {error}"))?;
+    let credentials = identity::decode_credentials(&data)
+        .map_err(|error| format!("decode DNTLS credentials: {error}"))?;
+    let endpoint = credentials
+        .resolver_endpoint("")
+        .map_err(|error| format!("select DNTLS resolver: {error}"))?;
+    let store = identity::Store::open(Some(data_dir))
+        .map_err(|error| format!("open DNTLS data dir: {error}"))?;
+    let resolver = resolver::Client::new(
+        &endpoint.url,
+        [
+            resolver::with_pins(store.pins()),
+            resolver::with_trusted_service_key(endpoint.service_public_key),
+        ],
+    )
+    .map_err(|error| format!("create DNTLS resolver client: {error}"))?;
+    let resolver = Arc::new(resolver);
+    let handshaker = tls::new(tls::Config {
+        credentials: Some(credentials),
+        resolver: Some(resolver.clone()),
+        validity: time::Duration::ZERO,
+        next_protos: vec!["http/1.1".to_string()],
+    })
+    .map_err(|error| format!("create DNTLS handshaker: {error}"))?;
+    Ok((resolver, handshaker))
 }
 
-fn connector_file_name(with_triple: bool) -> String {
-    let mut name = CONNECTOR_BIN.to_string();
-    if with_triple {
-        name.push('-');
-        name.push_str(&host_triple());
+/// Resolves the community's verified record and returns the first endpoint
+/// whose relay proves the community identity and advertises Buzz under the
+/// record-bound Nostr key.
+///
+/// `BUZZ_DNTLS_ENDPOINT_OVERRIDE=<ip>:<port>` replaces the record's dial
+/// targets, for a relay that is not yet published (local development, a
+/// self-hosted relay behind NAT). The name, the relay's identity, and the
+/// NIP-11 key binding are verified exactly as before; only routing changes.
+async fn discover(
+    community: &str,
+    resolver: Arc<resolver::Client>,
+    handshaker: tls::Handshaker,
+) -> Result<Verified, String> {
+    let record = resolver
+        .resolve_record(community)
+        .await
+        .map_err(|error| format!("resolve {community}: {error}"))?;
+    let (mut endpoints, relay_key) = parse_record(&record)?;
+    if let Some(raw) = std::env::var_os("BUZZ_DNTLS_ENDPOINT_OVERRIDE") {
+        let addr: SocketAddr = raw
+            .to_str()
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| "BUZZ_DNTLS_ENDPOINT_OVERRIDE must be <ip>:<port>".to_string())?;
+        endpoints = vec![BuzzEndpoint {
+            family: String::new(),
+            address: addr.ip().to_string(),
+            port: addr.port(),
+            priority: 0,
+        }];
     }
-    if cfg!(windows) {
-        name.push_str(".exe");
-    }
-    name
-}
-
-fn host_triple() -> &'static str {
-    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-    {
-        "aarch64-apple-darwin"
-    }
-    #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
-    {
-        "x86_64-apple-darwin"
-    }
-    #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
-    {
-        "x86_64-unknown-linux-gnu"
-    }
-    #[cfg(all(target_arch = "aarch64", target_os = "linux", target_env = "gnu"))]
-    {
-        "aarch64-unknown-linux-gnu"
-    }
-    #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "musl"))]
-    {
-        "x86_64-unknown-linux-musl"
-    }
-    #[cfg(all(target_arch = "aarch64", target_os = "linux", target_env = "musl"))]
-    {
-        "aarch64-unknown-linux-musl"
-    }
-    #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
-    {
-        "x86_64-pc-windows-msvc"
-    }
-    #[cfg(all(target_arch = "aarch64", target_os = "windows"))]
-    {
-        "aarch64-pc-windows-msvc"
-    }
-    #[cfg(not(any(
-        all(target_arch = "aarch64", target_os = "macos"),
-        all(target_arch = "x86_64", target_os = "macos"),
-        all(target_arch = "x86_64", target_os = "linux"),
-        all(target_arch = "aarch64", target_os = "linux"),
-        all(target_arch = "x86_64", target_os = "windows"),
-        all(target_arch = "aarch64", target_os = "windows"),
-    )))]
-    {
-        compile_error!("unsupported host for the dntls-demo-buzz sidecar")
-    }
-}
-
-fn resolve_connector_executable_from(candidates: &[PathBuf]) -> Result<PathBuf, String> {
-    for path in candidates {
-        if path.is_file() {
-            return Ok(path.clone());
+    let mut failures = Vec::new();
+    for endpoint in endpoints {
+        let addr = match endpoint.address.parse::<IpAddr>() {
+            Ok(ip) => SocketAddr::new(ip, endpoint.effective_port()),
+            Err(_) => {
+                failures.push(format!(
+                    "{}: address is not an IP literal",
+                    endpoint.address
+                ));
+                continue;
+            }
+        };
+        match probe(community, addr, &handshaker, &relay_key).await {
+            Ok(()) => {
+                return Ok(Verified { addr, handshaker });
+            }
+            Err(error) => failures.push(format!("{addr}: {error}")),
         }
     }
     Err(format!(
-        "{CONNECTOR_BIN} is not bundled; run desktop/scripts/fetch-dntls-connector.sh"
+        "no Buzz endpoint for {community} verified: {}",
+        failures.join("; ")
     ))
 }
 
-fn spawn_stderr_tail(stderr: std::process::ChildStderr) -> Arc<Mutex<VecDeque<String>>> {
-    let lines = Arc::new(Mutex::new(VecDeque::new()));
-    let captured = Arc::clone(&lines);
-    std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            let Ok(mut guard) = captured.lock() else {
-                return;
-            };
-            if guard.len() == STDERR_TAIL_LINES {
-                guard.pop_front();
+/// Validates the public resolve-record projection and returns the endpoints
+/// in priority order plus the relay's Nostr key.
+fn parse_record(data: &[u8]) -> Result<(Vec<BuzzEndpoint>, String), String> {
+    #[derive(Deserialize)]
+    struct Response {
+        record: Projection,
+    }
+    #[derive(Deserialize)]
+    struct Projection {
+        fields: RecordFields,
+    }
+    let response: Response =
+        serde_json::from_slice(data).map_err(|error| format!("decode record: {error}"))?;
+    let fields = response.record.fields;
+    let mut endpoints = fields.buzz_endpoints.unwrap_or_default();
+    if endpoints.is_empty() {
+        return Err("record has no Buzz endpoints".to_string());
+    }
+    if endpoints.len() > MAX_ENDPOINTS {
+        return Err(format!(
+            "record has more than {MAX_ENDPOINTS} Buzz endpoints"
+        ));
+    }
+    let relay_key = fields
+        .nostr
+        .map(|binding| binding.public_key)
+        .filter(|key| {
+            key.len() == 64 && key.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+        .ok_or_else(|| "record has no valid Nostr public key".to_string())?;
+    endpoints.sort_by_key(|endpoint| endpoint.priority);
+    Ok((endpoints, relay_key))
+}
+
+/// Dials one endpoint over DNTLS TLS, requires it to identify as the
+/// community, and checks its NIP-11 document.
+async fn probe(
+    community: &str,
+    addr: SocketAddr,
+    handshaker: &tls::Handshaker,
+    relay_key: &str,
+) -> Result<(), String> {
+    let mut stream = dial(community, addr, handshaker).await?;
+    stream
+        .write_all(
+            format!(
+                "GET / HTTP/1.1\r\nHost: {community}\r\nAccept: application/nostr+json\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .map_err(|error| format!("write NIP-11 request: {error}"))?;
+    let mut raw = Vec::new();
+    stream
+        .take(MAX_NIP11_BYTES as u64 + 1)
+        .read_to_end(&mut raw)
+        .await
+        .map_err(|error| format!("read NIP-11 response: {error}"))?;
+    if raw.len() > MAX_NIP11_BYTES {
+        return Err(format!("NIP-11 response exceeds {MAX_NIP11_BYTES} bytes"));
+    }
+    let text = String::from_utf8_lossy(&raw);
+    let (head, body) = text
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| "NIP-11 response has no body".to_string())?;
+    let status = head.lines().next().unwrap_or("");
+    if !status.starts_with("HTTP/1.1 200") {
+        return Err(format!("NIP-11 returned {status}"));
+    }
+    #[derive(Deserialize)]
+    struct Nip11 {
+        #[serde(default)]
+        supported_extensions: Vec<String>,
+        #[serde(default, rename = "self")]
+        self_key: Option<String>,
+    }
+    let doc: Nip11 = serde_json::from_str(body.trim())
+        .map_err(|error| format!("decode NIP-11 document: {error}"))?;
+    if !doc.supported_extensions.iter().any(|e| e == BUZZ_EXTENSION) {
+        return Err("NIP-11 does not advertise Buzz capability".to_string());
+    }
+    if doc.self_key.as_deref() != Some(relay_key) {
+        return Err("NIP-11 self does not match the record-bound Nostr key".to_string());
+    }
+    Ok(())
+}
+
+/// Opens one DNTLS TLS connection to `addr` and requires the relay to
+/// identify as `community`.
+async fn dial(
+    community: &str,
+    addr: SocketAddr,
+    handshaker: &tls::Handshaker,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>, String> {
+    let connector = TlsConnector::from(handshaker.client_config());
+    // SNI is disabled in the SDK configuration; rustls still needs a name.
+    let placeholder = ServerName::try_from("localhost")
+        .map_err(|error| format!("placeholder server name: {error}"))?
+        .to_owned();
+    let tcp = tokio::time::timeout(DIAL_TIMEOUT, TcpStream::connect(addr))
+        .await
+        .map_err(|_| "connect timed out".to_string())?
+        .map_err(|error| format!("connect: {error}"))?;
+    let stream = tokio::time::timeout(DIAL_TIMEOUT, connector.connect(placeholder, tcp))
+        .await
+        .map_err(|_| "DNTLS handshake timed out".to_string())?
+        .map_err(|error| format!("DNTLS handshake: {error}"))?;
+    let remote = handshaker
+        .identity(stream.get_ref().1.peer_certificates().unwrap_or(&[]))
+        .ok_or_else(|| "relay presented no DNTLS identity".to_string())?;
+    if !remote.verified || !remote.fqdn.eq_ignore_ascii_case(community) {
+        return Err(format!("connected service identified as {:?}", remote.fqdn));
+    }
+    Ok(stream)
+}
+
+/// Splices each accepted loopback connection onto its own DNTLS TLS
+/// connection to the verified relay endpoint.
+async fn accept_loop(listener: TcpListener, community: String, verified: Verified) {
+    loop {
+        let (local, _) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                eprintln!("buzz-desktop: dntls_connector {community}: accept failed: {error}");
+                continue;
             }
-            guard.push_back(line);
-        }
-    });
-    lines
-}
-
-fn with_stderr(error: String, lines: &Arc<Mutex<VecDeque<String>>>) -> String {
-    match format_stderr_tail(lines) {
-        Some(stderr) => format!("{error}\n{stderr}"),
-        None => error,
+        };
+        let community = community.clone();
+        let verified = verified.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut local = local;
+            let mut remote = match dial(&community, verified.addr, &verified.handshaker).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    eprintln!(
+                        "buzz-desktop: dntls_connector {community}: relay unavailable: {error}"
+                    );
+                    return;
+                }
+            };
+            // Ordinary disconnects surface here too; nothing to report.
+            let _ = tokio::io::copy_bidirectional(&mut local, &mut remote).await;
+        });
     }
-}
-
-fn format_stderr_tail(lines: &Arc<Mutex<VecDeque<String>>>) -> Option<String> {
-    let guard = lines.lock().ok()?;
-    if guard.is_empty() {
-        return None;
-    }
-    Some(guard.iter().cloned().collect::<Vec<_>>().join("\n"))
 }
 
 /// Normalizes one exact DNTLS FQDN and rejects URLs or partial names.
@@ -303,7 +397,7 @@ pub(crate) fn normalize_dntls_name(raw: &str) -> Result<String, String> {
     Ok(name)
 }
 
-/// Requires the child response to match the requested name and a loopback URL.
+/// Requires the ready response to match the requested name and a loopback URL.
 fn validate_ready(community: &str, ready: ConnectorReady) -> Result<ConnectorReady, String> {
     if ready.community != community {
         return Err("DNTLS connector returned a different community name".to_string());
@@ -372,36 +466,32 @@ mod tests {
     }
 
     #[test]
-    fn resolves_the_first_existing_sidecar_candidate() {
-        let temp = tempfile::tempdir().unwrap();
-        let missing = temp.path().join("missing");
-        let present = temp.path().join("dntls-demo-buzz-aarch64-apple-darwin");
-        std::fs::write(&present, b"#!/bin/sh\n").unwrap();
-        let resolved =
-            resolve_connector_executable_from(&[missing, present.clone()]).expect("sidecar");
-        assert_eq!(resolved, present);
+    fn parses_record_endpoints_in_priority_order() {
+        let key = "ab".repeat(32);
+        let data = format!(
+            r#"{{"record":{{"fields":{{"buzz_endpoints":[
+                {{"family":"ipv4","address":"203.0.113.9","priority":5}},
+                {{"family":"ipv4","address":"203.0.113.10","port":8443}}
+            ],"nostr":{{"public_key":"{key}","signature":"sig"}}}}}}}}"#
+        );
+        let (endpoints, relay_key) = parse_record(data.as_bytes()).expect("record");
+        assert_eq!(relay_key, key);
+        assert_eq!(endpoints[0].address, "203.0.113.10");
+        assert_eq!(endpoints[0].effective_port(), 8443);
+        assert_eq!(endpoints[1].address, "203.0.113.9");
+        assert_eq!(endpoints[1].effective_port(), 443);
     }
 
     #[test]
-    fn appends_the_last_stderr_lines() {
-        let lines = Arc::new(Mutex::new(VecDeque::from([
-            "one".to_string(),
-            "name not found".to_string(),
-        ])));
-        assert_eq!(
-            with_stderr("could not start connector".to_string(), &lines),
-            "could not start connector\none\nname not found"
+    fn rejects_records_without_endpoints_or_relay_key() {
+        let key = "ab".repeat(32);
+        assert!(parse_record(br#"{"record":{"fields":{}}}"#).is_err());
+        let no_key = r#"{"record":{"fields":{"buzz_endpoints":[{"family":"ipv4","address":"203.0.113.9"}]}}}"#;
+        assert!(parse_record(no_key.as_bytes()).is_err());
+        let bad_key = format!(
+            r#"{{"record":{{"fields":{{"buzz_endpoints":[{{"family":"ipv4","address":"203.0.113.9"}}],"nostr":{{"public_key":"{}"}}}}}}}}"#,
+            key.to_ascii_uppercase()
         );
-    }
-
-    #[test]
-    fn host_triple_is_a_known_tauri_target() {
-        let triple = host_triple();
-        assert!(
-            triple.contains("apple-darwin")
-                || triple.contains("unknown-linux")
-                || triple.contains("pc-windows"),
-            "{triple}"
-        );
+        assert!(parse_record(bad_key.as_bytes()).is_err());
     }
 }

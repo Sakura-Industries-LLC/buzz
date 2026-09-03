@@ -11,6 +11,11 @@
 //! [`stamp_identity`] writes from the connection info after deleting any
 //! inbound copy. The middleware runs on every listener, so nothing outside
 //! this process can supply that header.
+//!
+//! On this listener the community is the identity the relay itself presented
+//! and the caller verified, so [`stamp_identity`] also sets `Host` to that
+//! name: row-zero host binding selects the community from the DNTLS name, not
+//! from whatever authority a loopback bridge on the client happened to use.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -46,6 +51,8 @@ pub struct DntlsPeer {
     pub addr: SocketAddr,
     /// Network-verified caller name, lowercased.
     pub name: String,
+    /// Name the relay presented on this connection: the community authority.
+    pub community: Arc<str>,
 }
 
 impl Connected<IncomingStream<'_, DntlsListener>> for DntlsPeer {
@@ -62,6 +69,7 @@ impl Connected<IncomingStream<'_, DntlsListener>> for DntlsPeer {
 /// the worker thread driving that handshake; fine at demo scale.
 pub struct DntlsListener {
     local: SocketAddr,
+    community: Arc<str>,
     ready: mpsc::Receiver<(TlsStream<TcpStream>, DntlsPeer)>,
 }
 
@@ -69,12 +77,16 @@ impl DntlsListener {
     /// Builds the SDK handshaker from `cfg` and starts accepting on `tcp`.
     pub fn start(cfg: &DntlsTlsConfig, tcp: TcpListener) -> anyhow::Result<Self> {
         let local = tcp.local_addr()?;
-        let handshaker = handshaker(cfg)?;
+        let (community, handshaker) = handshaker(cfg)?;
         let acceptor =
             TlsAcceptor::from(handshaker.server_config(ClientIdentityMode::RequireIdentity)?);
         let (tx, ready) = mpsc::channel(READY_BACKLOG);
-        tokio::spawn(accept_loop(tcp, acceptor, handshaker, tx));
-        Ok(Self { local, ready })
+        tokio::spawn(accept_loop(tcp, acceptor, handshaker, community.clone(), tx));
+        Ok(Self {
+            local,
+            community,
+            ready,
+        })
     }
 }
 
@@ -97,13 +109,14 @@ impl Listener for DntlsListener {
         Ok(DntlsPeer {
             addr: self.local,
             name: String::new(),
+            community: self.community.clone(),
         })
     }
 }
 
 /// Loads the credential bundle and builds a handshaker whose resolver is the
-/// bundle's first trusted endpoint.
-fn handshaker(cfg: &DntlsTlsConfig) -> anyhow::Result<tls::Handshaker> {
+/// bundle's first trusted endpoint. Returns the presented name with it.
+fn handshaker(cfg: &DntlsTlsConfig) -> anyhow::Result<(Arc<str>, tls::Handshaker)> {
     let bundle = std::fs::read(&cfg.credentials_path)
         .map_err(|e| anyhow::anyhow!("read {}: {e}", cfg.credentials_path.display()))?;
     let credentials = identity::decode_credentials(&bundle)
@@ -126,19 +139,22 @@ fn handshaker(cfg: &DntlsTlsConfig) -> anyhow::Result<tls::Handshaker> {
         resolver = %endpoint.url,
         "DNTLS identity loaded for the main listener"
     );
-    tls::new(tls::Config {
+    let community: Arc<str> = credentials.fqdn().to_ascii_lowercase().into();
+    let handshaker = tls::new(tls::Config {
         credentials: Some(credentials),
         resolver: Some(Arc::new(resolver)),
         validity: time::Duration::ZERO,
         next_protos: vec!["http/1.1".to_string()],
     })
-    .map_err(|e| anyhow::anyhow!("create DNTLS handshaker: {e}"))
+    .map_err(|e| anyhow::anyhow!("create DNTLS handshaker: {e}"))?;
+    Ok((community, handshaker))
 }
 
 async fn accept_loop(
     tcp: TcpListener,
     acceptor: TlsAcceptor,
     handshaker: tls::Handshaker,
+    community: Arc<str>,
     tx: mpsc::Sender<(TlsStream<TcpStream>, DntlsPeer)>,
 ) {
     loop {
@@ -151,6 +167,7 @@ async fn accept_loop(
         };
         let acceptor = acceptor.clone();
         let handshaker = handshaker.clone();
+        let community = community.clone();
         let tx = tx.clone();
         tokio::spawn(async move {
             let stream = match acceptor.accept(stream).await {
@@ -168,6 +185,7 @@ async fn accept_loop(
             let peer = DntlsPeer {
                 addr,
                 name: caller.fqdn.to_ascii_lowercase(),
+                community,
             };
             info!(addr = %addr, name = %peer.name, "DNTLS caller verified");
             if tx.send((stream, peer)).await.is_err() {
@@ -178,14 +196,18 @@ async fn accept_loop(
 }
 
 /// Deletes any inbound `x-dntls-name` and, on a DNTLS-authenticated
-/// connection, writes the verified name and the plain socket address the rest
-/// of the relay expects in `ConnectInfo<SocketAddr>`.
+/// connection, writes the verified name, sets `Host` to the community name
+/// the relay presented, and inserts the plain socket address the rest of the
+/// relay expects in `ConnectInfo<SocketAddr>`.
 pub async fn stamp_identity(mut req: Request, next: Next) -> Response {
     req.headers_mut().remove(NAME_HEADER);
     if let Some(ConnectInfo(peer)) = req.extensions().get::<ConnectInfo<DntlsPeer>>().cloned() {
         req.extensions_mut().insert(ConnectInfo(peer.addr));
         if let Ok(value) = HeaderValue::from_str(&peer.name) {
             req.headers_mut().insert(NAME_HEADER, value);
+        }
+        if let Ok(value) = HeaderValue::from_str(&peer.community) {
+            req.headers_mut().insert(axum::http::header::HOST, value);
         }
     }
     next.run(req).await

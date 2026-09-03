@@ -24,9 +24,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Connector release bundled as the dntls-demo-buzz sidecar. Pinned so
-  # rebuilding a tag ships the same binary.
-  DNTLS_DEMO_BUZZ_VERSION: '0.1.1'
   NODE_VERSION: '24.14.1'
   PNPM_VERSION: '11.4.0'
 
@@ -202,11 +199,6 @@ jobs:
           fi
           cargo build --release --target "$TARGET" "${packages[@]}"
           ./scripts/bundle-sidecars.sh "$TARGET"
-
-      - name: Fetch the DNTLS connector sidecar
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: desktop/scripts/fetch-dntls-connector.sh "$TARGET"
 
       # notarytool reads the App Store Connect key from a file. The secret holds
       # the .p8 base64-encoded, the way GoReleaser wants it in the sibling repos.
