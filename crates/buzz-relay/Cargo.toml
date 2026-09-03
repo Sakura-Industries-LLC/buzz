@@ -81,6 +81,11 @@ metrics-exporter-prometheus = { workspace = true }
 metrics-util    = { workspace = true }
 pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 async-compression = { version = "0.4.42", features = ["tokio", "gzip"] }
+# Native DNTLS mutual TLS on the main listener (src/dntls.rs). The SDK is
+# consumed from git until it is published on crates.io.
+dntls-testnet-sdk = { git = "https://github.com/Sakura-Industries-LLC/dntls-public", rev = "d918c798f7aa1173a9ff06e3ad4f8c1ba16ab09d" }
+tokio-rustls = { version = "0.26", default-features = false }
+time = { version = "0.3", default-features = false }
 
 [features]
 dev = ["buzz-auth/dev"]

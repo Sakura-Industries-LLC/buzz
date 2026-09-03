@@ -1,10 +1,10 @@
 //! DNTLS verified-name admission HTTP API.
 //!
-//! The gateway terminates DNTLS mutual TLS and forwards the verified name in
-//! `X-DNTLS-Name`. The relay trusts that header when
-//! [`crate::config::DntlsAdmission`] is not `Off` and binds `pubkey ↔ fqdn` at
-//! NIP-42 AUTH or the first NIP-98-signed request. Operators must bind the
-//! relay to loopback behind the gateway.
+//! The relay's own listener terminates DNTLS mutual TLS (`crate::dntls`) and
+//! stamps the verified caller name on every request as `x-dntls-name` after
+//! deleting any inbound copy. The relay binds `pubkey ↔ fqdn` at NIP-42 AUTH
+//! or the first NIP-98-signed request when
+//! [`crate::config::DntlsAdmission`] is not `Off`.
 //!
 //! HTTP routes (all NIP-98 signed, outside the Nostr event data plane):
 //!
@@ -42,7 +42,7 @@ const NAMES_PATH: &str = "/api/dntls/names";
 /// NOTICE sent when a verified name is already bound to another pubkey.
 pub(crate) const NAME_ALREADY_CLAIMED_NOTICE: &str = "dntls: name already claimed";
 
-const DNTLS_NAME_HEADER: &str = "x-dntls-name";
+const DNTLS_NAME_HEADER: &str = crate::dntls::NAME_HEADER;
 const MAX_FQDN_LEN: usize = 255;
 
 /// Outcome of applying a gateway-verified name at AUTH or NIP-98.
@@ -62,26 +62,20 @@ struct PubkeyRequest {
 
 fn require_configured(state: &AppState) -> Result<(), (StatusCode, Json<Value>)> {
     match state.config.dntls_admission {
-        DntlsAdmission::Off => Err(api_error(
-            StatusCode::NOT_FOUND,
-            "dntls_not_configured",
-        )),
+        DntlsAdmission::Off => Err(api_error(StatusCode::NOT_FOUND, "dntls_not_configured")),
         DntlsAdmission::Auto | DntlsAdmission::Approve => Ok(()),
     }
 }
 
-/// Read `X-DNTLS-Name` from a WebSocket upgrade when admission is enabled.
-pub(crate) fn verified_name_from_upgrade(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Option<String> {
+/// Read the stamped verified name from a WebSocket upgrade when admission is enabled.
+pub(crate) fn verified_name_from_upgrade(state: &AppState, headers: &HeaderMap) -> Option<String> {
     if state.config.dntls_admission == DntlsAdmission::Off {
         return None;
     }
     verified_name_from_headers(headers)
 }
 
-/// Normalize a gateway-supplied DNTLS name header.
+/// Normalize the stamped verified-name header.
 pub(crate) fn verified_name_from_headers(headers: &HeaderMap) -> Option<String> {
     let raw = headers.get(DNTLS_NAME_HEADER)?.to_str().ok()?;
     let fqdn = raw.trim().to_ascii_lowercase();
@@ -207,12 +201,7 @@ pub(crate) async fn apply_connection_admission(
         DntlsAdmission::Auto => {
             match state
                 .db
-                .upsert_dntls_approved_application(
-                    tenant.community(),
-                    pubkey_hex,
-                    fqdn,
-                    pubkey_hex,
-                )
+                .upsert_dntls_approved_application(tenant.community(), pubkey_hex, fqdn, pubkey_hex)
                 .await
                 .map_err(|e| format!("dntls approved upsert: {e}"))?
             {
@@ -229,7 +218,7 @@ pub(crate) async fn apply_connection_admission(
     }
 }
 
-/// Apply a stored `X-DNTLS-Name` after NIP-42 crypto succeeds.
+/// Apply a stored verified name after NIP-42 crypto succeeds.
 ///
 /// Returns `false` when AUTH must stop (internal error). A claimed name sends
 /// a NOTICE and still returns `true` so ordinary membership can proceed.
@@ -259,7 +248,7 @@ pub(crate) async fn apply_auth_admission(
     }
 }
 
-/// Apply a gateway-verified `X-DNTLS-Name` after NIP-98 crypto succeeds.
+/// Apply the stamped verified name after NIP-98 crypto succeeds.
 ///
 /// No-op when admission is off or the header is absent. A claimed name cannot
 /// send a NOTICE over HTTP; the caller proceeds to ordinary membership.
@@ -431,7 +420,6 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicU8;
 
-    use base64::Engine;
     use axum::{
         body::{to_bytes, Body},
         extract::ws::Message as WsMessage,
@@ -439,6 +427,7 @@ mod tests {
         routing::{get, post},
         Router,
     };
+    use base64::Engine;
     use nostr::{EventBuilder, Keys, Kind, RelayUrl, Tag};
     use sha2::{Digest, Sha256};
     use tokio::sync::{mpsc, Mutex, RwLock};
@@ -685,10 +674,8 @@ mod tests {
             3,
         );
 
-        let relay_url = crate::api::bridge::nip42_expected_relay_url(
-            &state.config.relay_url,
-            &conn.tenant,
-        );
+        let relay_url =
+            crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &conn.tenant);
         let event = EventBuilder::auth(&challenge, RelayUrl::parse(&relay_url).expect("relay url"))
             .sign_with_keys(keys)
             .expect("sign AUTH");
@@ -698,10 +685,7 @@ mod tests {
         while let Ok(msg) = send_rx.try_recv() {
             messages.push(ws_text(&msg));
         }
-        let authenticated = matches!(
-            *conn.auth_state.read().await,
-            AuthState::Authenticated(_)
-        );
+        let authenticated = matches!(*conn.auth_state.read().await, AuthState::Authenticated(_));
         (authenticated, messages)
     }
 
@@ -724,10 +708,7 @@ mod tests {
     #[test]
     fn verified_name_from_headers_lowercases_and_ignores_empty() {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            DNTLS_NAME_HEADER,
-            HeaderValue::from_static("Alice.Example"),
-        );
+        headers.insert(DNTLS_NAME_HEADER, HeaderValue::from_static("Alice.Example"));
         assert_eq!(
             verified_name_from_headers(&headers).as_deref(),
             Some("alice.example")
@@ -790,7 +771,9 @@ mod tests {
             auth_connection(state.clone(), &host, &joiner, Some("Alice.Example")).await;
         assert!(ok, "auto AUTH should succeed: {messages:?}");
         assert!(
-            messages.iter().all(|msg| !msg.contains(NAME_ALREADY_CLAIMED_NOTICE)),
+            messages
+                .iter()
+                .all(|msg| !msg.contains(NAME_ALREADY_CLAIMED_NOTICE)),
             "{messages:?}"
         );
 
@@ -899,12 +882,7 @@ mod tests {
             .expect("community exists");
         state
             .db
-            .add_relay_member(
-                community.id,
-                &second.public_key().to_hex(),
-                "member",
-                None,
-            )
+            .add_relay_member(community.id, &second.public_key().to_hex(), "member", None)
             .await
             .expect("seed second member");
 
@@ -913,7 +891,10 @@ mod tests {
 
         let (ok, messages) =
             auth_connection(state.clone(), &host, &second, Some("shared.example")).await;
-        assert!(ok, "AUTH still succeeds as an ordinary member: {messages:?}");
+        assert!(
+            ok,
+            "AUTH still succeeds as an ordinary member: {messages:?}"
+        );
         assert!(
             messages
                 .iter()

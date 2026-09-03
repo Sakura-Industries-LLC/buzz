@@ -357,9 +357,13 @@ pub struct Config {
     /// documents or age attestation are configured.
     pub join_policy: Option<JoinPolicyConfig>,
 
-    /// How gateway-verified DNTLS names are admitted (`BUZZ_DNTLS_ADMISSION`).
-    /// `Off` (default) ignores `X-DNTLS-Name` and 404s every `/api/dntls` route.
+    /// How DNTLS-verified names are admitted (`BUZZ_DNTLS_ADMISSION`).
+    /// `Off` (default) ignores verified names and 404s every `/api/dntls` route.
     pub dntls_admission: DntlsAdmission,
+
+    /// Native DNTLS mutual TLS on the main listener (`BUZZ_DNTLS_CREDENTIALS`).
+    /// Absent means the listener speaks plain TCP as upstream Buzz does.
+    pub dntls_tls: Option<DntlsTlsConfig>,
 
     /// Deployment-admin API and SPA configuration. Absent means the surface is disabled.
     pub admin: Option<AdminConfig>,
@@ -375,20 +379,33 @@ pub struct Config {
 
 /// How the relay admits DNTLS-authenticated connections.
 ///
-/// Configured by `BUZZ_DNTLS_ADMISSION`. The gateway-verified name arrives in
-/// the `X-DNTLS-Name` header; this setting decides what the relay does with it
-/// at NIP-42 AUTH or the first NIP-98-signed request. The header is trusted
-/// unconditionally when this is not [`DntlsAdmission::Off`]; bind the relay to
-/// loopback behind the gateway.
+/// Configured by `BUZZ_DNTLS_ADMISSION`. The verified caller name comes from
+/// the relay's own DNTLS TLS listener ([`DntlsTlsConfig`]); this setting
+/// decides what the relay does with it at NIP-42 AUTH or the first
+/// NIP-98-signed request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DntlsAdmission {
-    /// Header ignored; every `/api/dntls` route returns 404.
+    /// Verified names ignored; every `/api/dntls` route returns 404.
     #[default]
     Off,
     /// Bind pubkey↔name at first successful AUTH or NIP-98 request and admit as a member.
     Auto,
     /// Create or refresh a pending application; owners/admins admit it.
     Approve,
+}
+
+/// Native DNTLS mutual TLS for the main listener.
+///
+/// `BUZZ_DNTLS_CREDENTIALS` points at the community name's Portal-exported
+/// credential bundle; the relay presents that identity and requires every
+/// caller to present a network-verified DNTLS identity of its own.
+/// `BUZZ_DNTLS_DATA_DIR` (optional) holds the resolver pin file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DntlsTlsConfig {
+    /// Path of the community's credential bundle.
+    pub credentials_path: std::path::PathBuf,
+    /// Data directory for resolver pins; `None` selects the SDK default.
+    pub data_dir: Option<std::path::PathBuf>,
 }
 
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -1216,6 +1233,27 @@ impl Config {
             },
         };
 
+        let dntls_tls = std::env::var("BUZZ_DNTLS_CREDENTIALS")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(|path| DntlsTlsConfig {
+                credentials_path: std::path::PathBuf::from(path),
+                data_dir: std::env::var("BUZZ_DNTLS_DATA_DIR")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .map(std::path::PathBuf::from),
+            });
+        if let Some(tls) = &dntls_tls {
+            if !tls.credentials_path.is_file() {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_DNTLS_CREDENTIALS={} is not a file",
+                    tls.credentials_path.display()
+                )));
+            }
+        }
+
         if let Some(ref dir) = web_dir {
             if !dir.join("index.html").is_file() {
                 return Err(ConfigError::InvalidValue(format!(
@@ -1291,6 +1329,7 @@ impl Config {
             push_gateway_timeout,
             join_policy,
             dntls_admission,
+            dntls_tls,
             admin,
             web_dir,
             serve_git_web_gui,

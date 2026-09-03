@@ -149,13 +149,7 @@ pub async fn handle_connection(
         move || async move { check_state.db.is_community_active(community_id).await },
         move |control| {
             handle_active_connection(
-                socket,
-                run_state,
-                addr,
-                tenant,
-                dntls_name,
-                conn_id,
-                control,
+                socket, run_state, addr, tenant, dntls_name, conn_id, control,
             )
         },
     )

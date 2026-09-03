@@ -1402,16 +1402,10 @@ async fn serve(
                 .ok();
         });
 
-        let mut tcp_rx = shutdown_tx.subscribe();
-        axum::serve(
-            tcp_listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
-            tcp_rx.changed().await.ok();
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("TCP server error: {e}"))?;
+        let tcp_rx = shutdown_tx.subscribe();
+        serve_main(tcp_listener, router, &state, tcp_rx)
+            .await
+            .map_err(|e| anyhow::anyhow!("TCP server error: {e}"))?;
 
         let hard_shutdown = shutdown_handle
             .await
@@ -1427,21 +1421,49 @@ async fn serve(
     }
 
     // TCP-only path.
-    let mut tcp_rx = shutdown_tx.subscribe();
-    axum::serve(
-        tcp_listener,
-        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        tcp_rx.changed().await.ok();
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("Server error: {e}"))?;
+    let tcp_rx = shutdown_tx.subscribe();
+    serve_main(tcp_listener, router, &state, tcp_rx)
+        .await
+        .map_err(|e| anyhow::anyhow!("Server error: {e}"))?;
 
     let hard_shutdown = shutdown_handle
         .await
         .map_err(|e| anyhow::anyhow!("Shutdown task failed: {e}"))?;
     hard_shutdown.abort();
+    Ok(())
+}
+
+/// Serve the main router on `tcp_listener`, terminating native DNTLS mutual
+/// TLS when `BUZZ_DNTLS_CREDENTIALS` is configured and plain TCP otherwise.
+async fn serve_main(
+    tcp_listener: tokio::net::TcpListener,
+    router: axum::Router,
+    state: &AppState,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let shutdown = async move {
+        shutdown_rx.changed().await.ok();
+    };
+    match &state.config.dntls_tls {
+        Some(cfg) => {
+            let listener = buzz_relay::dntls::DntlsListener::start(cfg, tcp_listener)?;
+            info!("buzz-relay main listener terminating DNTLS mutual TLS");
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<buzz_relay::dntls::DntlsPeer>(),
+            )
+            .with_graceful_shutdown(shutdown)
+            .await?;
+        }
+        None => {
+            axum::serve(
+                tcp_listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown)
+            .await?;
+        }
+    }
     Ok(())
 }
 
