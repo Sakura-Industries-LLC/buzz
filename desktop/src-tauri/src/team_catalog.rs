@@ -67,7 +67,8 @@ pub(crate) async fn fetch_team_catalog(
     let keys = state.signing_keys()?;
     let owner = keys.public_key().to_hex();
     let relay_url = crate::relay::relay_ws_url_with_override(&state);
-    let session = relay_client.session(relay_url.clone(), keys).await;
+    let auth_url = crate::relay::auth_url_for_transport(&state, &relay_url);
+    let session = relay_client.session(relay_url.clone(), auth_url, keys).await;
     let by_id = collect_verified_catalog(|until| {
         let session = &session;
         async move {

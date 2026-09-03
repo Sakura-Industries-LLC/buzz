@@ -34,12 +34,30 @@ impl NostrWsConnection {
     /// Connects to the relay at `url` and performs NIP-42 authentication with `keys`.
     ///
     /// Pass `auth_tag` to include a NIP-OA authorization tag in the AUTH event.
+    /// The AUTH `relay` tag is the connection URL. For a DNTLS community whose
+    /// transport is a loopback connector, use
+    /// [`Self::connect_authenticated_with_origin`] so the tag is `wss://<name>`.
     pub async fn connect_authenticated(
         url: &str,
         keys: &Keys,
         auth_tag: Option<&Tag>,
     ) -> Result<Self, WsClientError> {
+        Self::connect_authenticated_with_origin(url, url, keys, auth_tag).await
+    }
+
+    /// Connects to `url` but signs NIP-42 AUTH with `auth_url` as the `relay` tag.
+    ///
+    /// `url` is the WebSocket transport (possibly `ws://127.0.0.1:<port>`).
+    /// `auth_url` is the relay identity the server will check, e.g.
+    /// `wss://buzz.dntls` for a DNTLS community.
+    pub async fn connect_authenticated_with_origin(
+        url: &str,
+        auth_url: &str,
+        keys: &Keys,
+        auth_tag: Option<&Tag>,
+    ) -> Result<Self, WsClientError> {
         let mut conn = Self::connect(url).await?;
+        conn.relay_url = auth_url.to_string();
         conn.authenticate(keys, auth_tag).await?;
         Ok(conn)
     }

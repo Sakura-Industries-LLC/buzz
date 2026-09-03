@@ -563,6 +563,7 @@ pub async fn start_archive_sync(
 ) -> Result<(), String> {
     let keys = state.signing_keys()?;
     let relay_url = crate::relay::relay_ws_url_with_override(&state);
+    let auth_url = crate::relay::auth_url_for_transport(&state, &relay_url);
     let scope = (keys.public_key().to_hex(), relay_url.clone());
 
     // Only cheap handles before `begin`: a start that lost its mark, or a
@@ -583,7 +584,7 @@ pub async fn start_archive_sync(
     // shared session is destructive to whatever scope holds it, so a superseded
     // start must not be able to reach this line at all. See [`ArchiveOwnership`].
     let (session, events) = relay_client
-        .archive_session(relay_url, keys, &ownership)
+        .archive_session(relay_url, auth_url, keys, &ownership)
         .await;
 
     let io = AppIo {
