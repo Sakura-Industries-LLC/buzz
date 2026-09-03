@@ -377,14 +377,15 @@ pub struct Config {
 ///
 /// Configured by `BUZZ_DNTLS_ADMISSION`. The gateway-verified name arrives in
 /// the `X-DNTLS-Name` header; this setting decides what the relay does with it
-/// at NIP-42 AUTH. The header is trusted unconditionally when this is not
-/// [`DntlsAdmission::Off`]; bind the relay to loopback behind the gateway.
+/// at NIP-42 AUTH or the first NIP-98-signed request. The header is trusted
+/// unconditionally when this is not [`DntlsAdmission::Off`]; bind the relay to
+/// loopback behind the gateway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DntlsAdmission {
     /// Header ignored; every `/api/dntls` route returns 404.
     #[default]
     Off,
-    /// Bind pubkey↔name at first successful AUTH and admit as a member.
+    /// Bind pubkey↔name at first successful AUTH or NIP-98 request and admit as a member.
     Auto,
     /// Create or refresh a pending application; owners/admins admit it.
     Approve,

@@ -3,7 +3,8 @@
 //! The gateway terminates DNTLS mutual TLS and forwards the verified name in
 //! `X-DNTLS-Name`. The relay trusts that header when
 //! [`crate::config::DntlsAdmission`] is not `Off` and binds `pubkey ↔ fqdn` at
-//! NIP-42 AUTH. Operators must bind the relay to loopback behind the gateway.
+//! NIP-42 AUTH or the first NIP-98-signed request. Operators must bind the
+//! relay to loopback behind the gateway.
 //!
 //! HTTP routes (all NIP-98 signed, outside the Nostr event data plane):
 //!
@@ -44,7 +45,7 @@ pub(crate) const NAME_ALREADY_CLAIMED_NOTICE: &str = "dntls: name already claime
 const DNTLS_NAME_HEADER: &str = "x-dntls-name";
 const MAX_FQDN_LEN: usize = 255;
 
-/// Outcome of applying a gateway-verified name at NIP-42 AUTH.
+/// Outcome of applying a gateway-verified name at AUTH or NIP-98.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AdmissionEffect {
     /// Mapping written or refreshed; AUTH should continue.
@@ -178,7 +179,7 @@ async fn admit_as_member(
     Ok(())
 }
 
-/// Bind or queue a gateway-verified name after NIP-42 AUTH succeeds.
+/// Bind or queue a gateway-verified name after NIP-42 AUTH or NIP-98 succeeds.
 pub(crate) async fn apply_connection_admission(
     state: &Arc<AppState>,
     tenant: &TenantContext,
@@ -255,6 +256,31 @@ pub(crate) async fn apply_auth_admission(
             );
             false
         }
+    }
+}
+
+/// Apply a gateway-verified `X-DNTLS-Name` after NIP-98 crypto succeeds.
+///
+/// No-op when admission is off or the header is absent. A claimed name cannot
+/// send a NOTICE over HTTP; the caller proceeds to ordinary membership.
+/// Safe to call once per request: binding is first-write-wins and idempotent.
+pub(crate) async fn apply_http_admission(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    headers: &HeaderMap,
+    pubkey_hex: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if state.config.dntls_admission == DntlsAdmission::Off {
+        return Ok(());
+    }
+    let Some(fqdn) = verified_name_from_headers(headers) else {
+        return Ok(());
+    };
+    match apply_connection_admission(state, tenant, pubkey_hex, &fqdn).await {
+        Ok(AdmissionEffect::Applied | AdmissionEffect::NameClaimed) => Ok(()),
+        Err(e) => Err(super::internal_error(&format!(
+            "DNTLS admission failed: {e}"
+        ))),
     }
 }
 
@@ -440,6 +466,7 @@ mod tests {
     }
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
+    const TEST_REDIS_URL: &str = "redis://127.0.0.1:6379";
 
     fn nip98_auth_header(keys: &Keys, method: &str, url: &str, body: &[u8]) -> String {
         let hash: [u8; 32] = Sha256::digest(body).into();
@@ -500,12 +527,20 @@ mod tests {
     }
 
     async fn dntls_test_state(host: &str, admission: DntlsAdmission) -> Option<Arc<AppState>> {
+        dntls_test_state_on(host, admission, "redis://127.0.0.1:1").await
+    }
+
+    async fn dntls_test_state_on(
+        host: &str,
+        admission: DntlsAdmission,
+        redis_url: &str,
+    ) -> Option<Arc<AppState>> {
         let mut config = crate::config::Config::from_env().ok()?;
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| TEST_DB_URL.to_string());
         config.database_url = database_url.clone();
-        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.redis_url = redis_url.to_string();
         config.relay_url = format!("wss://{host}");
         config.require_relay_membership = true;
         config.dntls_admission = admission;
@@ -554,6 +589,18 @@ mod tests {
         keys: &Keys,
         body: String,
     ) -> axum::response::Response {
+        send_with_dntls(state, host, method, path, keys, body, None).await
+    }
+
+    async fn send_with_dntls(
+        state: Arc<AppState>,
+        host: &str,
+        method: Method,
+        path: &str,
+        keys: &Keys,
+        body: String,
+        dntls_name: Option<&str>,
+    ) -> axum::response::Response {
         let scheme = if state.config.relay_url.trim_start().starts_with("wss://") {
             "https"
         } else {
@@ -566,6 +613,9 @@ mod tests {
             .uri(path)
             .header(header::HOST, host)
             .header(header::AUTHORIZATION, auth);
+        if let Some(name) = dntls_name {
+            builder = builder.header(DNTLS_NAME_HEADER, name);
+        }
         if !body.is_empty() {
             builder = builder.header(header::CONTENT_TYPE, "application/json");
         }
@@ -1113,5 +1163,154 @@ mod tests {
             json.get("error").and_then(Value::as_str),
             Some("relay_membership_required")
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_auto_header_nip98_binds_and_admits() {
+        let host = format!("dntls-nip98-auto-{}.example", Uuid::new_v4().simple());
+        let joiner = Keys::generate();
+        let state = dntls_test_state_on(&host, DntlsAdmission::Auto, TEST_REDIS_URL)
+            .await
+            .expect("requires reachable Postgres, Redis, and relay test state");
+
+        let response = send_with_dntls(
+            state.clone(),
+            &host,
+            Method::POST,
+            "/query",
+            &joiner,
+            "[]".to_string(),
+            Some("Alice.Example"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        let hex = joiner.public_key().to_hex();
+        assert!(state
+            .db
+            .is_relay_member(community.id, &hex)
+            .await
+            .expect("membership"));
+        let row = state
+            .db
+            .get_dntls_application(community.id, &hex)
+            .await
+            .expect("lookup")
+            .expect("approved mapping");
+        assert_eq!(row.fqdn, "alice.example");
+        assert_eq!(row.status, "approved");
+
+        let again = send_with_dntls(
+            state,
+            &host,
+            Method::POST,
+            "/query",
+            &joiner,
+            "[]".to_string(),
+            Some("Alice.Example"),
+        )
+        .await;
+        assert_eq!(again.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_approve_header_nip98_creates_pending() {
+        let host = format!("dntls-nip98-pending-{}.example", Uuid::new_v4().simple());
+        let joiner = Keys::generate();
+        let state = dntls_test_state_on(&host, DntlsAdmission::Approve, TEST_REDIS_URL)
+            .await
+            .expect("requires reachable Postgres, Redis, and relay test state");
+
+        let response = send_with_dntls(
+            state.clone(),
+            &host,
+            Method::POST,
+            "/query",
+            &joiner,
+            "[]".to_string(),
+            Some("alice.example"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let json = read_json(response).await;
+        assert_eq!(
+            json.get("error").and_then(Value::as_str),
+            Some("relay_membership_required")
+        );
+
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        let hex = joiner.public_key().to_hex();
+        assert!(!state
+            .db
+            .is_relay_member(community.id, &hex)
+            .await
+            .expect("membership"));
+        let row = state
+            .db
+            .get_dntls_application(community.id, &hex)
+            .await
+            .expect("lookup")
+            .expect("pending row");
+        assert_eq!(row.fqdn, "alice.example");
+        assert_eq!(row.status, "pending");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_missing_header_nip98_is_ordinary_403() {
+        let host = format!("dntls-nip98-plain-{}.example", Uuid::new_v4().simple());
+        let joiner = Keys::generate();
+        let state = dntls_test_state_on(&host, DntlsAdmission::Auto, TEST_REDIS_URL)
+            .await
+            .expect("requires reachable Postgres, Redis, and relay test state");
+
+        let response = send_with_dntls(
+            state.clone(),
+            &host,
+            Method::POST,
+            "/query",
+            &joiner,
+            "[]".to_string(),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let json = read_json(response).await;
+        assert_eq!(
+            json.get("error").and_then(Value::as_str),
+            Some("relay_membership_required")
+        );
+
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        let hex = joiner.public_key().to_hex();
+        assert!(!state
+            .db
+            .is_relay_member(community.id, &hex)
+            .await
+            .expect("membership"));
+        let row = state
+            .db
+            .get_dntls_application(community.id, &hex)
+            .await
+            .expect("lookup");
+        assert!(row.is_none());
     }
 }
