@@ -112,10 +112,7 @@ pub(crate) fn workspace_canonical_host(state: &AppState) -> Option<String> {
 
 /// ASCII-lowercase DNTLS community host, or `None` when empty.
 pub fn canonical_dntls_host(dntls_name: &str) -> Option<String> {
-    let host = dntls_name
-        .trim()
-        .trim_end_matches('.')
-        .to_ascii_lowercase();
+    let host = dntls_name.trim().trim_end_matches('.').to_ascii_lowercase();
     if host.is_empty() {
         None
     } else {
@@ -154,7 +151,6 @@ pub fn rewrite_url_for_auth(transport_url: &str, canonical_host: Option<&str>) -
     format!("{auth_scheme}://{host}{}", path_query_of(rest))
 }
 
-
 /// Sign-tag URL for `transport_url` under the active workspace's DNTLS host.
 pub fn auth_url_for_transport(state: &AppState, transport_url: &str) -> String {
     rewrite_url_for_auth(transport_url, workspace_canonical_host(state).as_deref())
@@ -173,7 +169,6 @@ pub fn managed_agent_auth_url_env(
     (auth != transport_url).then_some(auth)
 }
 
-
 fn strip_url_scheme(value: &str) -> &str {
     value
         .strip_prefix("wss://")
@@ -189,12 +184,11 @@ fn split_scheme(value: &str) -> Option<(&str, &str)> {
 }
 
 fn path_query_of(rest: &str) -> &str {
-    match rest.find(|c: char| c == '/' || c == '?' || c == '#') {
+    match rest.find(['/', '?', '#']) {
         Some(i) => &rest[i..],
         None => "",
     }
 }
-
 
 mod scope;
 pub use scope::{

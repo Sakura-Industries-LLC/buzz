@@ -18,6 +18,8 @@ pub mod config;
 pub mod conformance;
 /// WebSocket connection lifecycle and state.
 pub mod connection;
+/// Native DNTLS mutual TLS listener and verified-caller stamping.
+pub mod dntls;
 /// Relay error types.
 pub mod error;
 /// WebSocket message handlers for NIP-01 client commands.

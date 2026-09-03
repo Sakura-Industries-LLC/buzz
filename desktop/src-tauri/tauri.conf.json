@@ -61,8 +61,7 @@
       "binaries/buzz-backend-kubernetes",
       "binaries/buzz-dev-mcp",
       "binaries/git-credential-nostr",
-      "binaries/buzz",
-      "binaries/dntls-demo-buzz"
+      "binaries/buzz"
     ],
     "icon": [
       "icons/32x32.png",

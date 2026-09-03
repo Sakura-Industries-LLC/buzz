@@ -238,6 +238,14 @@ pub fn run() {
         .manage(channel_head_cache::ChannelHeadCacheStore::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
+            // BUZZ_OPEN_DEVTOOLS=1 opens the WebKit inspector at boot in debug
+            // builds, for driving the app from a terminal without Safari.
+            #[cfg(debug_assertions)]
+            if std::env::var_os("BUZZ_OPEN_DEVTOOLS").is_some() {
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    window.open_devtools();
+                }
+            }
             #[cfg(target_os = "macos")]
             {
                 tray_menu::init(&app_handle)?;

@@ -208,6 +208,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(middleware::from_fn(track_metrics))
         .layer(http_trace_layer())
         .layer(build_cors_layer(&state.config.cors_origins))
+        .layer(middleware::from_fn(crate::dntls::stamp_identity))
 }
 
 fn http_trace_layer() -> TraceLayer<HttpMakeClassifier, fn(&Request<Body>) -> tracing::Span> {
@@ -373,7 +374,9 @@ async fn nip11_or_ws_handler(
                 return (StatusCode::SERVICE_UNAVAILABLE, "relay restarting").into_response();
             }
             limit_relay_websocket(ws, max_frame_bytes)
-                .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant, dntls_name))
+                .on_upgrade(move |socket| {
+                    handle_connection(socket, state, addr, tenant, dntls_name)
+                })
                 .into_response()
         }
         Err(_) => {
