@@ -3,7 +3,8 @@
 
 use super::{
     build_profile_event, classify_intercepted_response, effective_agent_relay_url,
-    extract_retry_in_hint, parse_command_response, relay_http_base_url, MALFORMED_RESPONSE_MESSAGE,
+    extract_retry_in_hint, parse_command_response, relay_http_base_url, rewrite_url_for_auth,
+    MALFORMED_RESPONSE_MESSAGE,
 };
 use serde::Deserialize;
 
@@ -189,6 +190,59 @@ fn loopback_wss_localhost_preserves_authority() {
         "https://localhost:3000"
     );
 }
+
+// ── rewrite_url_for_auth (DNTLS community origin) ────────────────────────
+
+#[test]
+fn dntls_loopback_query_rewrites_to_https_and_drops_port() {
+    assert_eq!(
+        rewrite_url_for_auth(
+            "http://127.0.0.1:63330/query",
+            Some("buzzdemo.dntls"),
+        ),
+        "https://buzzdemo.dntls/query"
+    );
+}
+
+#[test]
+fn dntls_loopback_ws_rewrites_to_wss_and_drops_port() {
+    assert_eq!(
+        rewrite_url_for_auth("ws://127.0.0.1:63330", Some("buzzdemo.dntls")),
+        "wss://buzzdemo.dntls"
+    );
+}
+
+#[test]
+fn dntls_wss_transport_stays_wss() {
+    assert_eq!(
+        rewrite_url_for_auth(
+            "wss://127.0.0.1:443/huddle/1/audio",
+            Some("buzzdemo.dntls"),
+        ),
+        "wss://buzzdemo.dntls/huddle/1/audio"
+    );
+}
+
+#[test]
+fn dntls_rewrite_preserves_query_string() {
+    assert_eq!(
+        rewrite_url_for_auth(
+            "http://127.0.0.1:9/api/dntls/names?limit=1",
+            Some("BuzzDemo.dntls"),
+        ),
+        "https://buzzdemo.dntls/api/dntls/names?limit=1"
+    );
+}
+
+#[test]
+fn ordinary_community_leaves_transport_url_unchanged() {
+    assert_eq!(
+        rewrite_url_for_auth("ws://127.0.0.1:3000", None),
+        "ws://127.0.0.1:3000"
+    );
+}
+
+
 
 // ── classify_intercepted_response ────────────────────────────────────────
 

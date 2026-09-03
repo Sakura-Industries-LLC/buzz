@@ -372,6 +372,14 @@ export function getRelayHttpUrl(): Promise<string> {
   return invokeTauri<string>("get_relay_http_url");
 }
 
+/** URL used in NIP-98 `u` tags and NIP-42 `relay` tags.
+ *  Transport may be a loopback connector; DNTLS communities rewrite onto
+ *  `https://<name>` / `wss://<name>` regardless of the loopback scheme. */
+export function canonicalAuthUrl(url: string): Promise<string> {
+  return invokeTauri<string>("canonical_auth_url", { url });
+}
+
+
 export async function addChannelMembers(
   input: AddChannelMembersInput,
 ): Promise<AddChannelMembersResult> {
@@ -1077,6 +1085,7 @@ export async function applyCommunity(
   token?: string,
   reposDir?: string,
   agentManagedProfiles?: boolean,
+  dntlsName?: string,
 ): Promise<void> {
   await invokeTauri("apply_workspace", {
     relayUrl,
@@ -1084,6 +1093,7 @@ export async function applyCommunity(
     token: token ?? null,
     reposDir: reposDir ?? null,
     agentManagedProfiles: agentManagedProfiles ?? false,
+    dntlsName: dntlsName ?? null,
   });
 }
 

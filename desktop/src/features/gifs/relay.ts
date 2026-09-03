@@ -7,7 +7,7 @@ import {
   type RelayGifSearchInfo,
 } from "@/features/gifs/api";
 import { relayHttpFromWs } from "@/shared/api/inviteHelpers";
-import { signRelayEvent } from "@/shared/api/tauri";
+import { canonicalAuthUrl, signRelayEvent } from "@/shared/api/tauri";
 
 const KLIPY_CUSTOMER_ID_STORAGE_KEY_PREFIX = "buzz:klipy-customer-id:v1:";
 const NIP98_KIND = 27235;
@@ -74,7 +74,7 @@ async function relayPost<T>(
   const response = await fetch(url, {
     body,
     headers: {
-      Authorization: await nip98PostHeader(url, body),
+      Authorization: await nip98PostHeader(await canonicalAuthUrl(url), body),
       "Content-Type": "application/json",
     },
     method: "POST",

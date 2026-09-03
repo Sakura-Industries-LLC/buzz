@@ -66,11 +66,13 @@ export function WelcomeSetup({
   );
 
   const startConnection = React.useCallback(
-    (relayUrl: string) => {
+    (relayUrl: string, dntlsName?: string) => {
       communityOnboarding.start({
         source: "first-community",
         firstCommunityPage: page === "member" ? "member" : "join",
         relayUrl,
+        dntlsName,
+        communityName: dntlsName,
       });
     },
     [communityOnboarding, page],
@@ -263,7 +265,7 @@ export function WelcomeSetup({
                   }
                   onConnect={startConnection}
                   onRedeem={redeemInvite}
-                  placeholder="Invite link or community URL"
+                  placeholder="Invite link, community URL, or DNTLS name"
                   variant="onboarding-spotlight"
                 />
                 {page === "join" ? (

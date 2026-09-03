@@ -218,6 +218,11 @@ type E2eConfig = {
       age_attestation_required: boolean;
       version: string;
     } | null;
+    /**
+     * Stored DNTLS identity name. Omit to pretend a credentials file is
+     * already present; set `null` to exercise the first-run picker path.
+     */
+    dntlsCredentialsName?: string | null;
     /** Delay Builderlab login completion so cancellation/retry UI can be tested. */
     builderlabLoginDelayMs?: number;
     /** Bound Builderlab Nostr identity. Null/omitted = not linked yet. */
@@ -11545,6 +11550,33 @@ export function maybeInstallE2eTauriMocks() {
           relay_url: getRelayWsUrl(activeConfig),
         };
       }
+      case "dntls_credentials_status": {
+        const mock = activeConfig?.mock;
+        const name =
+          mock && Object.hasOwn(mock, "dntlsCredentialsName")
+            ? (mock.dntlsCredentialsName ?? null)
+            : "demo-alice.dntls";
+        return { name };
+      }
+      case "import_dntls_credentials": {
+        const name = "demo-alice.dntls";
+        if (activeConfig) {
+          activeConfig.mock = {
+            ...activeConfig.mock,
+            dntlsCredentialsName: name,
+          };
+        }
+        return { name };
+      }
+      case "remove_dntls_credentials": {
+        if (activeConfig) {
+          activeConfig.mock = {
+            ...activeConfig.mock,
+            dntlsCredentialsName: null,
+          };
+        }
+        return null;
+      }
       case "get_huddle_state": {
         const snapshot = mockHuddle ? structuredClone(mockHuddle.state) : null;
         const delayMs = activeConfig?.mock?.huddleStateReadDelayMs ?? 0;
@@ -13026,6 +13058,17 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "get_relay_http_url":
         return getRelayHttpUrl(activeConfig);
+      case "canonical_auth_url": {
+        if (
+          payload &&
+          typeof payload === "object" &&
+          "url" in payload &&
+          typeof payload.url === "string"
+        ) {
+          return payload.url;
+        }
+        return "";
+      }
       case "relay_requires_membership":
         return activeConfig?.mock?.relayRequiresMembership ?? false;
       case "discover_acp_providers":

@@ -98,6 +98,11 @@ pub fn get_relay_http_url(state: State<'_, AppState>) -> String {
 }
 
 #[tauri::command]
+pub fn canonical_auth_url(url: String, state: State<'_, AppState>) -> String {
+    crate::relay::auth_url_for_transport(&state, &url)
+}
+
+#[tauri::command]
 pub fn get_media_proxy_port(state: State<'_, AppState>) -> u16 {
     state
         .media_proxy_port
@@ -645,6 +650,7 @@ pub async fn create_auth_event(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let keys = state.signing_keys()?;
+    let relay_url = crate::relay::auth_url_for_transport(&state, &relay_url);
 
     tauri::async_runtime::spawn_blocking(move || {
         let tags = vec![

@@ -7,6 +7,7 @@ mod channel_head_cache;
 mod commands;
 mod deep_link;
 mod dntls_connector;
+mod dntls_credentials;
 mod egress_guard;
 mod event_sync;
 mod events;
@@ -536,6 +537,9 @@ pub fn run() {
             take_pending_entity_deep_link,
             acknowledge_pending_entity_deep_link,
             dntls_connector::start_dntls_connector,
+            dntls_credentials::dntls_credentials_status,
+            dntls_credentials::import_dntls_credentials,
+            dntls_credentials::remove_dntls_credentials,
             start_builderlab_login,
             cancel_builderlab_login,
             get_builderlab_auth,
@@ -597,6 +601,7 @@ pub fn run() {
             is_shared_identity,
             get_relay_ws_url,
             get_relay_http_url,
+            canonical_auth_url,
             get_media_proxy_port,
             fetch_link_preview_metadata,
             discover_acp_auth_methods,

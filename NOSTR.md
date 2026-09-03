@@ -122,7 +122,9 @@ usable if it is already a relay member, and the relay sends
 `NOTICE dntls: name already claimed`. Reconnects are idempotent.
 
 The deployment community host must equal the DNTLS name: `RELAY_URL=wss://<name>`
-seeds it, and the connector forwards `Host: <name>`.
+seeds it, and the connector forwards `Host: <name>`. Desktop AUTH `relay` tags
+and NIP-98 `u` tags are always `wss://<name>` / `https://<name>/…`; the
+connector loopback URL is transport only.
 
 `GET /api/dntls/names` returns the approved mappings `{ pubkey, fqdn, approved_at }`
 for members. The desktop verified-name badge reads this list.

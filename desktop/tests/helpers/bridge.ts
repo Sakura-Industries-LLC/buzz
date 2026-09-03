@@ -169,6 +169,11 @@ type MockBridgeOptions = {
     age_attestation_required: boolean;
     version: string;
   } | null;
+  /**
+   * Stored DNTLS identity name. Omit to pretend a credentials file is already
+   * present; set `null` to exercise the first-run picker path.
+   */
+  dntlsCredentialsName?: string | null;
   /** Bound Builderlab Nostr identity. Null/omitted = not linked yet. */
   builderlabIdentity?: { npub?: string; pubkey_hex?: string } | null;
   /** Communities owned by the mocked Builderlab account. */

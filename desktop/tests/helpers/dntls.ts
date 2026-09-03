@@ -9,6 +9,14 @@ const DB_DOCKER_CONTAINER =
   process.env.BUZZ_DB_DOCKER_CONTAINER ?? "buzz-postgres";
 const COMMUNITY_HOST = process.env.BUZZ_COMMUNITY_HOST ?? "localhost:3000";
 
+/** Mock IPC names used when joining a `.dntls` community from the desktop. */
+export const DNTLS_DESKTOP_COMMANDS = {
+  startConnector: "start_dntls_connector",
+  credentialsStatus: "dntls_credentials_status",
+  importCredentials: "import_dntls_credentials",
+  removeCredentials: "remove_dntls_credentials",
+} as const;
+
 function runSql(sql: string) {
   const env = { ...process.env, PGPASSWORD: DB_PASS };
   try {

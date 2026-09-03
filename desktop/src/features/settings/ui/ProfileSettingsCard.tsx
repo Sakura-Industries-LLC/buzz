@@ -22,6 +22,7 @@ import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { Textarea } from "@/shared/ui/textarea";
+import { DntlsIdentityRow } from "./DntlsIdentityRow";
 import { PrivateKeyBackupRow } from "./PrivateKeyBackupRow";
 import {
   SettingsOptionGroup,
@@ -800,6 +801,7 @@ export function ProfileSettingsCard({
                                 value={nip05Handle}
                               />
                               <PrivateKeyBackupRow />
+                              <DntlsIdentityRow />
                             </div>
                           </details>
                         </SettingsOptionGroup>

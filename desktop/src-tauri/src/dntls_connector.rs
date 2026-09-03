@@ -1,15 +1,18 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
-use tauri::State;
+use tauri::{AppHandle, State};
 use url::{Host, Url};
 
-const DEFAULT_CONNECTOR: &str = "dntls-demo-buzz";
-const CONNECTOR_ENV: &str = "DNTLS_DEMO_BUZZ_CONNECTOR";
+use crate::dntls_credentials::{credentials_bundle_path, credentials_data_dir};
+
 const START_TIMEOUT: Duration = Duration::from_secs(30);
+const STDERR_TAIL_LINES: usize = 10;
+const CONNECTOR_BIN: &str = "dntls-demo-buzz";
 
 /// One running local connector and the URL assigned to its DNTLS community.
 struct RunningConnector {
@@ -52,20 +55,34 @@ pub(crate) struct ConnectorReady {
 /// Starts or reuses the local connector for one DNTLS community.
 #[tauri::command]
 pub(crate) async fn start_dntls_connector(
+    app: AppHandle,
     community: String,
     state: State<'_, DntlsConnectors>,
 ) -> Result<ConnectorReady, String> {
     let community = normalize_dntls_name(&community)?;
+    let executable = resolve_connector_executable()?;
+    let credentials = credentials_bundle_path(&app)?;
+    if !credentials.is_file() {
+        return Err(
+            "choose a DNTLS credentials file before adding this community".to_string(),
+        );
+    }
+    let data_dir = credentials_data_dir(&app)?;
     let children = Arc::clone(&state.children);
-    tauri::async_runtime::spawn_blocking(move || start_connector(children, community))
-        .await
-        .map_err(|error| format!("DNTLS connector task failed: {error}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        start_connector(children, community, executable, credentials, data_dir)
+    })
+    .await
+    .map_err(|error| format!("DNTLS connector task failed: {error}"))?
 }
 
 /// Starts one connector while serializing duplicate requests for the same name.
 fn start_connector(
     children: Arc<Mutex<HashMap<String, RunningConnector>>>,
     community: String,
+    executable: PathBuf,
+    credentials: PathBuf,
+    data_dir: PathBuf,
 ) -> Result<ConnectorReady, String> {
     let mut children = children
         .lock()
@@ -79,22 +96,32 @@ fn start_connector(
         }
     }
 
-    let executable = std::env::var_os(CONNECTOR_ENV).unwrap_or_else(|| DEFAULT_CONNECTOR.into());
-    let mut command = Command::new(executable);
+    let mut command = Command::new(&executable);
     command
         .arg("connect")
         .arg(&community)
+        .arg("--credentials")
+        .arg(&credentials)
+        .arg("--data-dir")
+        .arg(&data_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     crate::util::configure_no_window(&mut command);
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("could not start {DEFAULT_CONNECTOR}: {error}"))?;
+    let mut child = command.spawn().map_err(|error| {
+        format!(
+            "could not start {CONNECTOR_BIN} at {}: {error}",
+            executable.display()
+        )
+    })?;
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| "DNTLS connector did not expose its startup response".to_string())?;
+    let stderr_tail = match child.stderr.take() {
+        Some(stderr) => spawn_stderr_tail(stderr),
+        None => Arc::new(Mutex::new(VecDeque::new())),
+    };
     let (sender, receiver) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
         let mut line = String::new();
@@ -121,7 +148,7 @@ fn start_connector(
         Err(error) => {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(error);
+            return Err(with_stderr(error, &stderr_tail));
         }
     };
     children.insert(
@@ -134,8 +161,131 @@ fn start_connector(
     Ok(ready)
 }
 
+/// Resolves the bundled `dntls-demo-buzz` sidecar the same way other desktop
+/// binaries are found: next to the app executable, then `src-tauri/binaries/`.
+pub(crate) fn resolve_connector_executable() -> Result<PathBuf, String> {
+    resolve_connector_executable_from(&connector_candidates())
+}
+
+fn connector_candidates() -> Vec<PathBuf> {
+    let exe_name = connector_file_name(false);
+    let triple_name = connector_file_name(true);
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.join(&exe_name));
+            candidates.push(parent.join(&triple_name));
+        }
+    }
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries");
+    candidates.push(manifest.join(&triple_name));
+    candidates.push(manifest.join(&exe_name));
+    candidates
+}
+
+fn connector_file_name(with_triple: bool) -> String {
+    let mut name = CONNECTOR_BIN.to_string();
+    if with_triple {
+        name.push('-');
+        name.push_str(&host_triple());
+    }
+    if cfg!(windows) {
+        name.push_str(".exe");
+    }
+    name
+}
+
+fn host_triple() -> &'static str {
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    {
+        "aarch64-apple-darwin"
+    }
+    #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
+    {
+        "x86_64-apple-darwin"
+    }
+    #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+    {
+        "x86_64-unknown-linux-gnu"
+    }
+    #[cfg(all(target_arch = "aarch64", target_os = "linux", target_env = "gnu"))]
+    {
+        "aarch64-unknown-linux-gnu"
+    }
+    #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "musl"))]
+    {
+        "x86_64-unknown-linux-musl"
+    }
+    #[cfg(all(target_arch = "aarch64", target_os = "linux", target_env = "musl"))]
+    {
+        "aarch64-unknown-linux-musl"
+    }
+    #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+    {
+        "x86_64-pc-windows-msvc"
+    }
+    #[cfg(all(target_arch = "aarch64", target_os = "windows"))]
+    {
+        "aarch64-pc-windows-msvc"
+    }
+    #[cfg(not(any(
+        all(target_arch = "aarch64", target_os = "macos"),
+        all(target_arch = "x86_64", target_os = "macos"),
+        all(target_arch = "x86_64", target_os = "linux"),
+        all(target_arch = "aarch64", target_os = "linux"),
+        all(target_arch = "x86_64", target_os = "windows"),
+        all(target_arch = "aarch64", target_os = "windows"),
+    )))]
+    {
+        compile_error!("unsupported host for the dntls-demo-buzz sidecar")
+    }
+}
+
+fn resolve_connector_executable_from(candidates: &[PathBuf]) -> Result<PathBuf, String> {
+    for path in candidates {
+        if path.is_file() {
+            return Ok(path.clone());
+        }
+    }
+    Err(format!(
+        "{CONNECTOR_BIN} is not bundled; run desktop/scripts/fetch-dntls-connector.sh"
+    ))
+}
+
+fn spawn_stderr_tail(stderr: std::process::ChildStderr) -> Arc<Mutex<VecDeque<String>>> {
+    let lines = Arc::new(Mutex::new(VecDeque::new()));
+    let captured = Arc::clone(&lines);
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let Ok(mut guard) = captured.lock() else {
+                return;
+            };
+            if guard.len() == STDERR_TAIL_LINES {
+                guard.pop_front();
+            }
+            guard.push_back(line);
+        }
+    });
+    lines
+}
+
+fn with_stderr(error: String, lines: &Arc<Mutex<VecDeque<String>>>) -> String {
+    match format_stderr_tail(lines) {
+        Some(stderr) => format!("{error}\n{stderr}"),
+        None => error,
+    }
+}
+
+fn format_stderr_tail(lines: &Arc<Mutex<VecDeque<String>>>) -> Option<String> {
+    let guard = lines.lock().ok()?;
+    if guard.is_empty() {
+        return None;
+    }
+    Some(guard.iter().cloned().collect::<Vec<_>>().join("\n"))
+}
+
 /// Normalizes one exact DNTLS FQDN and rejects URLs or partial names.
-fn normalize_dntls_name(raw: &str) -> Result<String, String> {
+pub(crate) fn normalize_dntls_name(raw: &str) -> Result<String, String> {
     let name = raw.trim().trim_end_matches('.').to_ascii_lowercase();
     if !name.ends_with(".dntls") || name.len() <= ".dntls".len() {
         return Err("enter a complete DNTLS community name ending in .dntls".to_string());
@@ -219,5 +369,39 @@ mod tests {
             }
         )
         .is_err());
+    }
+
+    #[test]
+    fn resolves_the_first_existing_sidecar_candidate() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        let present = temp.path().join("dntls-demo-buzz-aarch64-apple-darwin");
+        std::fs::write(&present, b"#!/bin/sh\n").unwrap();
+        let resolved =
+            resolve_connector_executable_from(&[missing, present.clone()]).expect("sidecar");
+        assert_eq!(resolved, present);
+    }
+
+    #[test]
+    fn appends_the_last_stderr_lines() {
+        let lines = Arc::new(Mutex::new(VecDeque::from([
+            "one".to_string(),
+            "name not found".to_string(),
+        ])));
+        assert_eq!(
+            with_stderr("could not start connector".to_string(), &lines),
+            "could not start connector\none\nname not found"
+        );
+    }
+
+    #[test]
+    fn host_triple_is_a_known_tauri_target() {
+        let triple = host_triple();
+        assert!(
+            triple.contains("apple-darwin")
+                || triple.contains("unknown-linux")
+                || triple.contains("pc-windows"),
+            "{triple}"
+        );
     }
 }
