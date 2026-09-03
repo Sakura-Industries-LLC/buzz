@@ -41,7 +41,10 @@
   },
   "plugins": {
     "updater": {
-      "endpoints": []
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI3M0FGNDdDNDFBRENBMEUKUldRT3lxMUJmUFE2SjJPb1VDZWs1L2JvL3hSQWtzNWhPNjByR3FEZ1lkcm51eXMyazltaGpKNlIK",
+      "endpoints": [
+        "https://github.com/Sakura-Industries-LLC/buzz/releases/latest/download/latest.json"
+      ]
     },
     "deep-link": {
       "desktop": {

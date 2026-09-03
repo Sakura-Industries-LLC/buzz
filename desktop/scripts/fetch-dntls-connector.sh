@@ -3,10 +3,11 @@
 # desktop/src-tauri/binaries/dntls-demo-buzz-<target-triple>.
 #
 # Preference:
-#   1. DNTLS_DEMO_BUZZ_LOCAL=/path/to/dntls-demo-buzz  — copy a locally built binary
-#      (needed until a GitHub release ships `connect --credentials`).
-#   2. Otherwise download the GitHub release archive for the host OS/arch from
-#      Sakura-Industries-LLC/dntls-demo-buzz.
+#   1. DNTLS_DEMO_BUZZ_LOCAL=/path/to/dntls-demo-buzz  — copy a locally built binary.
+#   2. Otherwise download the GitHub release archive for the target OS/arch from
+#      Sakura-Industries-LLC/dntls-demo-buzz. DNTLS_DEMO_BUZZ_VERSION pins the
+#      release (with or without the leading "v"); unset means the latest one.
+#      Release builds must pin it so a rebuild of a tag ships the same connector.
 set -euo pipefail
 
 HOST=$(rustc -vV | sed -n 's|host: ||p')
@@ -51,7 +52,9 @@ case "$TARGET" in
 esac
 
 REPO="Sakura-Industries-LLC/dntls-demo-buzz"
-if ! TAG=$(gh release view -R "$REPO" --json tagName --jq .tagName 2>/dev/null); then
+if [[ -n "${DNTLS_DEMO_BUZZ_VERSION:-}" ]]; then
+  TAG="v${DNTLS_DEMO_BUZZ_VERSION#v}"
+elif ! TAG=$(gh release view -R "$REPO" --json tagName --jq .tagName 2>/dev/null); then
   echo "Error: no GitHub release for $REPO yet." >&2
   echo "Build dntls-demo-buzz locally and rerun with DNTLS_DEMO_BUZZ_LOCAL=/path/to/dntls-demo-buzz." >&2
   exit 1
@@ -63,10 +66,19 @@ WORKDIR=$(mktemp -d)
 trap 'rm -rf "$WORKDIR"' EXIT
 gh release download "$TAG" -R "$REPO" --pattern "$ARCHIVE" --dir "$WORKDIR"
 
+mkdir -p "$WORKDIR/out"
 if [[ "$ARCHIVE" == *.zip ]]; then
-  unzip -q "$WORKDIR/$ARCHIVE" -d "$WORKDIR/out"
+  # Git Bash on Windows runners ships neither unzip nor a zip-capable tar,
+  # so fall back to 7-Zip, which those images do carry.
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -q "$WORKDIR/$ARCHIVE" -d "$WORKDIR/out"
+  elif command -v 7z >/dev/null 2>&1; then
+    7z x -bso0 -bsp0 -o"$WORKDIR/out" "$WORKDIR/$ARCHIVE"
+  else
+    echo "Error: extracting $ARCHIVE needs unzip or 7z on PATH." >&2
+    exit 1
+  fi
 else
-  mkdir -p "$WORKDIR/out"
   tar -xzf "$WORKDIR/$ARCHIVE" -C "$WORKDIR/out"
 fi
 
