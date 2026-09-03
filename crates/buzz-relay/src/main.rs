@@ -1434,7 +1434,7 @@ async fn serve(
 }
 
 /// Serve the main router on `tcp_listener`, terminating native DNTLS mutual
-/// TLS when `BUZZ_DNTLS_CREDENTIALS` is configured and plain TCP otherwise.
+/// TLS when `BUZZ_DNTLS_CREDENTIALS_FILE` is configured and plain TCP otherwise.
 async fn serve_main(
     tcp_listener: tokio::net::TcpListener,
     router: axum::Router,

@@ -361,7 +361,7 @@ pub struct Config {
     /// `Off` (default) ignores verified names and 404s every `/api/dntls` route.
     pub dntls_admission: DntlsAdmission,
 
-    /// Native DNTLS mutual TLS on the main listener (`BUZZ_DNTLS_CREDENTIALS`).
+    /// Native DNTLS mutual TLS on the main listener (`BUZZ_DNTLS_CREDENTIALS_FILE`).
     /// Absent means the listener speaks plain TCP as upstream Buzz does.
     pub dntls_tls: Option<DntlsTlsConfig>,
 
@@ -396,7 +396,7 @@ pub enum DntlsAdmission {
 
 /// Native DNTLS mutual TLS for the main listener.
 ///
-/// `BUZZ_DNTLS_CREDENTIALS` points at the community name's Portal-exported
+/// `BUZZ_DNTLS_CREDENTIALS_FILE` points at the community name's Portal-exported
 /// credential bundle; the relay presents that identity and requires every
 /// caller to present a network-verified DNTLS identity of its own.
 /// `BUZZ_DNTLS_DATA_DIR` (optional) holds the resolver pin file.
@@ -1233,7 +1233,7 @@ impl Config {
             },
         };
 
-        let dntls_tls = std::env::var("BUZZ_DNTLS_CREDENTIALS")
+        let dntls_tls = std::env::var("BUZZ_DNTLS_CREDENTIALS_FILE")
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -1248,7 +1248,7 @@ impl Config {
         if let Some(tls) = &dntls_tls {
             if !tls.credentials_path.is_file() {
                 return Err(ConfigError::InvalidValue(format!(
-                    "BUZZ_DNTLS_CREDENTIALS={} is not a file",
+                    "BUZZ_DNTLS_CREDENTIALS_FILE={} is not a file",
                     tls.credentials_path.display()
                 )));
             }

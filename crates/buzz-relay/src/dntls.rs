@@ -1,6 +1,6 @@
 //! Native DNTLS mutual TLS for the relay's main listener.
 //!
-//! When `BUZZ_DNTLS_CREDENTIALS` is set, the main listener terminates
+//! When `BUZZ_DNTLS_CREDENTIALS_FILE` is set, the main listener terminates
 //! identity-authenticated TLS 1.3 with the DNTLS SDK instead of speaking
 //! plain TCP behind a gateway. The relay presents the community name's own
 //! credentials, and every caller must present a DNTLS identity that the
