@@ -40,18 +40,18 @@ RUN if [ -n "${EXTRA_CA_CERTS}" ]; then \
 ENV CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt
 RUN cargo install cargo-chef --locked --version 0.1.71
 WORKDIR /build
-# dntls-testnet-sdk lives in the private Sakura-Industries-LLC/dntls-public
+# dntls-testnet-sdk lives in the private Sakura-Industries-LLC/dntls-testnet
 # repository. Cargo fetches it through the git CLI so the read-only token
-# mounted at /run/secrets/dntls_public_token (BuildKit secret, never a layer)
-# can be attached by /usr/local/bin/with-dntls-public-token. Builds without the
+# mounted at /run/secrets/dntls_testnet_token (BuildKit secret, never a layer)
+# can be attached by /usr/local/bin/with-dntls-testnet-token. Builds without the
 # secret still work for anyone whose git credential helper can reach the repo.
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 RUN printf '%s\n' '#!/bin/sh' 'set -eu' \
-    'if [ -s /run/secrets/dntls_public_token ]; then' \
-    '  git config --global url."https://x-access-token:$(cat /run/secrets/dntls_public_token)@github.com/Sakura-Industries-LLC/dntls-public".insteadOf "https://github.com/Sakura-Industries-LLC/dntls-public"' \
+    'if [ -s /run/secrets/dntls_testnet_token ]; then' \
+    '  git config --global url."https://x-access-token:$(cat /run/secrets/dntls_testnet_token)@github.com/Sakura-Industries-LLC/dntls-testnet".insteadOf "https://github.com/Sakura-Industries-LLC/dntls-testnet"' \
     'fi' \
-    'exec "$@"' > /usr/local/bin/with-dntls-public-token \
-    && chmod 0755 /usr/local/bin/with-dntls-public-token
+    'exec "$@"' > /usr/local/bin/with-dntls-testnet-token \
+    && chmod 0755 /usr/local/bin/with-dntls-testnet-token
 
 # ─── Stage 2: plan dependency graph ─────────────────────────────────────────
 # Only the manifests are needed to compute the recipe; this layer rebuilds
@@ -77,8 +77,8 @@ ENV CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
 COPY --from=planner /build/recipe.json recipe.json
 # Cook the full workspace recipe — relay deps include workspace siblings, so
 # scoping to -p buzz-relay misses transitive deps and re-builds them later.
-RUN --mount=type=secret,id=dntls_public_token \
-    with-dntls-public-token cargo chef cook --release --recipe-path recipe.json
+RUN --mount=type=secret,id=dntls_testnet_token \
+    with-dntls-testnet-token cargo chef cook --release --recipe-path recipe.json
 COPY . .
 # Compile immutable artifact identity into the relay. Defaults preserve local
 # and third-party builds that do not run in provenance-aware CI.
@@ -88,8 +88,8 @@ ARG BUZZ_BUILD_URL=unknown
 ENV BUZZ_SOURCE_SHA=${BUZZ_SOURCE_SHA} \
     BUZZ_BUILD_ID=${BUZZ_BUILD_ID} \
     BUZZ_BUILD_URL=${BUZZ_BUILD_URL}
-RUN --mount=type=secret,id=dntls_public_token \
-    with-dntls-public-token cargo build --release --locked -p buzz-relay --bin buzz-relay \
+RUN --mount=type=secret,id=dntls_testnet_token \
+    with-dntls-testnet-token cargo build --release --locked -p buzz-relay --bin buzz-relay \
                                    -p buzz-admin --bin buzz-admin \
                                    -p buzz-pair-relay --bin buzz-pair-relay
 

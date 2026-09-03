@@ -150,25 +150,25 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # dntls-testnet-sdk is fetched from the private dntls-public repository
+      # dntls-testnet-sdk is fetched from the private dntls-testnet repository
       # with a read-only token the Sakura Release app mints for that one repo.
-      - name: Create dntls-public read token
-        id: dntls-public
+      - name: Create dntls-testnet read token
+        id: dntls-testnet
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ vars.SAKURA_RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.SAKURA_RELEASE_APP_PRIVATE_KEY }}
           owner: Sakura-Industries-LLC
-          repositories: dntls-public
+          repositories: dntls-testnet
           permission-contents: read
 
-      - name: Route cargo's dntls-public fetch through the token
+      - name: Route cargo's dntls-testnet fetch through the token
         shell: bash
         env:
-          DNTLS_PUBLIC_TOKEN: ${{ steps.dntls-public.outputs.token }}
+          DNTLS_TESTNET_TOKEN: ${{ steps.dntls-testnet.outputs.token }}
         run: |
-          git config --global "url.https://x-access-token:${DNTLS_PUBLIC_TOKEN}@github.com/Sakura-Industries-LLC/dntls-public.insteadOf" \
-            "https://github.com/Sakura-Industries-LLC/dntls-public"
+          git config --global "url.https://x-access-token:${DNTLS_TESTNET_TOKEN}@github.com/Sakura-Industries-LLC/dntls-testnet.insteadOf" \
+            "https://github.com/Sakura-Industries-LLC/dntls-testnet"
           echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0

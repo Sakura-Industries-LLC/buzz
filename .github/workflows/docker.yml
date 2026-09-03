@@ -180,19 +180,19 @@ jobs:
             org.opencontainers.image.description=WebSocket relay server for the Buzz communications platform
             org.opencontainers.image.licenses=Apache-2.0
 
-      # dntls-testnet-sdk is fetched from the private dntls-public repository.
+      # dntls-testnet-sdk is fetched from the private dntls-testnet repository.
       # The Sakura Release app mints a read-only token scoped to that one repo;
       # the Dockerfile reads it as a BuildKit secret, so it never enters a layer.
       # Pull requests from forks have no app secret and build without it.
-      - name: Create dntls-public read token
-        id: dntls-public
+      - name: Create dntls-testnet read token
+        id: dntls-testnet
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ vars.SAKURA_RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.SAKURA_RELEASE_APP_PRIVATE_KEY }}
           owner: Sakura-Industries-LLC
-          repositories: dntls-public
+          repositories: dntls-testnet
           permission-contents: read
 
       - name: Build and push release image by digest
@@ -205,7 +205,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           secrets: |
-            dntls_public_token=${{ steps.dntls-public.outputs.token }}
+            dntls_testnet_token=${{ steps.dntls-testnet.outputs.token }}
           build-args: |
             BUZZ_SOURCE_SHA=${{ github.sha }}
             BUZZ_BUILD_ID=github-actions:${{ github.run_id }}:${{ github.run_attempt }}
@@ -229,7 +229,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           secrets: |
-            dntls_public_token=${{ steps.dntls-public.outputs.token }}
+            dntls_testnet_token=${{ steps.dntls-testnet.outputs.token }}
           build-args: |
             BUZZ_SOURCE_SHA=${{ github.sha }}
             BUZZ_BUILD_ID=github-actions:${{ github.run_id }}:${{ github.run_attempt }}

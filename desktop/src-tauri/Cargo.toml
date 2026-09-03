@@ -104,7 +104,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 url = "2"
 # Native DNTLS community discovery and mutual TLS (src/dntls_connector.rs).
 # Consumed from git until the SDK is published on crates.io.
-dntls-testnet-sdk = { git = "https://github.com/Sakura-Industries-LLC/dntls-public", rev = "b06d5034a14e039d611909816f0743a05a806349" }
+dntls-testnet-sdk = { git = "https://github.com/Sakura-Industries-LLC/dntls-testnet", rev = "b06d5034a14e039d611909816f0743a05a806349" }
 tokio-rustls = { version = "0.26", default-features = false }
 time = { version = "0.3", default-features = false }
 buzz_core_pkg = { package = "buzz-core", path = "../../crates/buzz-core" }
