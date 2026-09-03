@@ -61,10 +61,6 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=desktop-dntls-v${version}" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
-
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -72,7 +68,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          if gh release view "$TAG" >/dev/null 2>&1; then
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $TAG already exists; the platform jobs will upload into it."
             exit 0
           fi
@@ -87,7 +83,7 @@ jobs:
 
           \`latest.json\` serves the in-app updater.
           EOF
-          gh release create "$TAG" \
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Buzz DNTLS ${VERSION}" \
             --notes-file "$notes"
@@ -288,7 +284,8 @@ jobs:
         run: |
           set -euo pipefail
           work="$(mktemp -d)"
-          gh release download "$TAG" --dir "$work" --pattern '*.sig'
+          # This job has no checkout, so gh cannot infer the repository.
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" --dir "$work" --pattern '*.sig'
 
           manifest="$(jq -n --arg version "$VERSION" \
             '{version: $version, notes: "", pub_date: (now | todate), platforms: {}}')"
@@ -322,4 +319,4 @@ jobs:
           fi
 
           printf '%s\n' "$manifest" > "$work/latest.json"
-          gh release upload "$TAG" "$work/latest.json" --clobber
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" "$work/latest.json" --clobber
