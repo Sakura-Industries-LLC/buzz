@@ -22,10 +22,13 @@ use crate::state::AppState;
 use super::{api_error, internal_error, not_found};
 
 pub(crate) async fn enforce_http_admission(
-    state: &AppState,
+    state: &Arc<AppState>,
     tenant: &TenantContext,
     pubkey: &nostr::PublicKey,
+    headers: &HeaderMap,
 ) -> Result<(), (StatusCode, Json<Value>)> {
+    super::dntls::apply_http_admission(state, tenant, headers, &pubkey.to_hex()).await?;
+
     let limit = state.auth.config().rate_limits.human_api_calls_per_min;
     match crate::admission::check_principal(
         state.admission_rate_limiter.as_ref(),
@@ -849,7 +852,7 @@ async fn submit_event_authed(
 ) -> SubmitOutcome {
     // Admission and replay checks fire before body parse — a 429 or replay
     // reject on a malformed body must still be attributed.
-    if let Err(e) = enforce_http_admission(state, tenant, &pubkey).await {
+    if let Err(e) = enforce_http_admission(state, tenant, &pubkey, headers).await {
         return SubmitOutcome::Err {
             status: e.0,
             response: e,
@@ -1045,7 +1048,7 @@ async fn query_events_authed(
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    enforce_http_admission(state, tenant, &pubkey).await?;
+    enforce_http_admission(state, tenant, &pubkey, headers).await?;
     check_nip98_replay(state, tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
@@ -1572,7 +1575,7 @@ async fn count_events_authed(
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    enforce_http_admission(state, tenant, &pubkey).await?;
+    enforce_http_admission(state, tenant, &pubkey, headers).await?;
     check_nip98_replay(state, tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 

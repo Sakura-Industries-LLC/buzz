@@ -108,18 +108,20 @@ verified name on every proxied request, including the WebSocket upgrade, as
 trusts that header unconditionally when admission is enabled. Bind the relay
 to loopback behind the gateway so clients cannot set the header themselves.
 
-`BUZZ_DNTLS_ADMISSION` selects the AUTH-time behaviour:
+`BUZZ_DNTLS_ADMISSION` selects the behaviour at NIP-42 AUTH or the first
+NIP-98-signed request:
 
 | Mode | Effect |
 |------|--------|
 | `off` (default) | Header ignored. Every `/api/dntls` route returns 404. |
-| `auto` | At first successful NIP-42 AUTH, bind `nostr pubkey ↔ dntls fqdn` for that community and admit the pubkey as a member. |
+| `auto` | At first successful NIP-42 AUTH or the first NIP-98-signed request, bind `nostr pubkey ↔ dntls fqdn` for that community and admit the pubkey as a member. |
 | `approve` | Create or refresh a pending application. Owners/admins admit it with `POST /api/dntls/approve` (or reject with `POST /api/dntls/reject`). |
 
 First-bound-wins: if the fqdn is already mapped to a different pubkey in that
-community, the name is not re-bound. AUTH still succeeds, but the key is only
-usable if it is already a relay member, and the relay sends
-`NOTICE dntls: name already claimed`. Reconnects are idempotent.
+community, the name is not re-bound. The request still proceeds as an ordinary
+(non-verified) member if membership allows. WebSocket AUTH sends
+`NOTICE dntls: name already claimed`; HTTP has no NOTICE channel. Reconnects
+and repeat NIP-98 requests are idempotent.
 
 The deployment community host must equal the DNTLS name: `RELAY_URL=wss://<name>`
 seeds it, and the connector forwards `Host: <name>`. Desktop AUTH `relay` tags

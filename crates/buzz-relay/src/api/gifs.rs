@@ -146,7 +146,7 @@ async fn authenticate(
         true,
         true,
     )?;
-    bridge::enforce_http_admission(state, &tenant, &pubkey).await?;
+    bridge::enforce_http_admission(state, &tenant, &pubkey, headers).await?;
     bridge::check_nip98_replay(state, &tenant, event_id_bytes).await?;
     relay_members::enforce_relay_membership(
         state,
