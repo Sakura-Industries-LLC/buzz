@@ -145,13 +145,14 @@ pub(crate) async fn unread_catch_up(
         return Err("unread catch-up identity does not match active scope".to_string());
     }
     let relay_url = crate::relay::relay_ws_url_with_override(&state);
+    let auth_url = crate::relay::auth_url_for_transport(&state, &relay_url);
     // The lease must outlive every task below: when the leased session is
     // private (a scope switch landed mid-command), dropping the lease shuts
     // that session down, and a `handle()` clone still held by a running fetch
     // would then be reading a cancelled socket. The `join_next` drain ends
     // before this binding does, so that holds today — keep it that way, and in
     // particular do not move the lease into a task or narrow its scope.
-    let session = relay_client.session(relay_url.clone(), keys).await;
+    let session = relay_client.session(relay_url.clone(), auth_url, keys).await;
 
     let concurrency = std::sync::Arc::new(Semaphore::new(8));
     let mut pending = JoinSet::new();

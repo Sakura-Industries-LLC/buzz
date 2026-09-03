@@ -16,7 +16,10 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 use crate::app_state::AppState;
-use crate::relay::{relay_api_base_url_with_override, relay_ws_url_with_override};
+use crate::relay::{
+    relay_api_base_url_with_override, relay_ws_url_with_override, rewrite_url_for_auth,
+    workspace_canonical_host,
+};
 
 #[derive(Serialize, Clone)]
 struct PairingSasPayload {
@@ -130,6 +133,7 @@ async fn start_pairing_session(
     let ws_url = relay_ws_url_with_override(&state);
     let http_url = relay_api_base_url_with_override(&state);
     let pairing_relay_url = resolve_pairing_relay_url(&ws_url, probe_pairing_relay(&ws_url).await)?;
+    let auth_url = pairing_auth_url(&ws_url, workspace_canonical_host(&state).as_deref());
     let (session, qr_payload) = PairingSession::new_source(pairing_relay_url.clone());
     let mut qr_uri = encode_qr(&qr_payload);
     if mode == PairingMode::RecoverIdentity {
@@ -163,6 +167,7 @@ async fn start_pairing_session(
 
     tauri::async_runtime::spawn(pairing_ws_task(
         pairing_relay_url,
+        auth_url,
         Arc::clone(&pairing.session),
         PairingTaskContext {
             mode,
@@ -272,6 +277,7 @@ pub async fn cancel_pairing(pairing: State<'_, PairingHandle>) -> Result<(), Str
 
 async fn pairing_ws_task(
     relay_url: String,
+    auth_url: String,
     session: Arc<tokio::sync::Mutex<Option<PairingSession>>>,
     context: PairingTaskContext,
     cancel: CancellationToken,
@@ -280,6 +286,7 @@ async fn pairing_ws_task(
 ) {
     if let Err(e) = pairing_ws_task_inner(
         &relay_url,
+        &auth_url,
         &session,
         &context,
         &cancel,
@@ -297,6 +304,7 @@ async fn pairing_ws_task(
 
 async fn pairing_ws_task_inner(
     relay_url: &str,
+    auth_url: &str,
     session: &Arc<tokio::sync::Mutex<Option<PairingSession>>>,
     context: &PairingTaskContext,
     cancel: &CancellationToken,
@@ -308,7 +316,7 @@ async fn pairing_ws_task_inner(
         .map_err(|e| format!("WebSocket connection failed: {e}"))?;
     let (mut write, mut read) = ws.split();
 
-    handle_nip42_auth(&mut read, &mut write, session, relay_url).await?;
+    handle_nip42_auth(&mut read, &mut write, session, auth_url).await?;
 
     let our_pk = {
         let guard = session.lock().await;
@@ -579,7 +587,7 @@ async fn handle_nip42_auth<R, W>(
     read: &mut R,
     write: &mut W,
     session: &Arc<tokio::sync::Mutex<Option<PairingSession>>>,
-    relay_url: &str,
+    auth_url: &str,
 ) -> Result<(), String>
 where
     R: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
@@ -608,7 +616,7 @@ where
     };
 
     let relay_url_parsed =
-        nostr::RelayUrl::parse(relay_url).map_err(|e| format!("invalid relay URL: {e}"))?;
+        nostr::RelayUrl::parse(auth_url).map_err(|e| format!("invalid relay URL: {e}"))?;
     let auth_json = {
         let guard = session.lock().await;
         let s = guard.as_ref().ok_or("session gone during auth")?;
@@ -704,6 +712,10 @@ async fn probe_pairing_relay(relay_url: &str) -> PairingRelay {
     };
 
     pairing_relay_from_nip11(&json)
+}
+
+fn pairing_auth_url(transport_url: &str, canonical_host: Option<&str>) -> String {
+    rewrite_url_for_auth(transport_url, canonical_host)
 }
 
 fn resolve_pairing_relay_url(

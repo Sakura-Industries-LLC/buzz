@@ -41,6 +41,10 @@ pub(crate) fn parse_channel_uuid(channel_id: &str) -> Result<Uuid, String> {
 /// Handshake timeout — matches the server's AUTH_TIMEOUT (5 s).
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+fn huddle_auth_url(transport_url: &str, canonical_host: Option<&str>) -> String {
+    crate::relay::rewrite_url_for_auth(transport_url, canonical_host)
+}
+
 fn build_audio_auth_event(
     keys: &nostr::Keys,
     relay_url: &str,
@@ -73,6 +77,7 @@ async fn connect_authenticated_audio_socket(
     channel_id: &str,
     parent_channel_id: Option<&str>,
     relay_url: &str,
+    auth_url: &str,
     keys: &nostr::Keys,
     auth_tag_json: Option<&str>,
 ) -> Result<(WsSink, WsReceiver, u8, Vec<(u8, String, u8)>), String> {
@@ -106,8 +111,7 @@ async fn connect_authenticated_audio_socket(
     })
     .await
     .map_err(|_| "timeout waiting for challenge from relay".to_string())??;
-
-    let event = build_audio_auth_event(keys, relay_url, &challenge, auth_tag_json)?;
+    let event = build_audio_auth_event(keys, auth_url, &challenge, auth_tag_json)?;
     let event_json: serde_json::Value = serde_json::from_str(&event.as_json())
         .map_err(|e| format!("failed to serialize auth event: {e}"))?;
     let auth_msg = serde_json::json!({
@@ -184,6 +188,10 @@ pub(crate) async fn connect_audio_relay(
     state: &AppState,
 ) -> Result<(CancellationToken, tokio::sync::mpsc::Sender<Vec<u8>>), String> {
     let relay_url = crate::relay::relay_ws_url_with_override(state);
+    let auth_url = huddle_auth_url(
+        &relay_url,
+        crate::relay::workspace_canonical_host(state).as_deref(),
+    );
     let keys = state.keys.lock().map_err(|e| e.to_string())?.clone();
 
     // TTS interrupt flags — recv task cancels TTS when remote humans speak.
@@ -208,9 +216,15 @@ pub(crate) async fn connect_audio_relay(
 
     let app_handle = state.app_handle.lock().ok().and_then(|g| g.clone());
 
-    let (ws_tx, ws_rx, _peer_index, initial_peers) =
-        connect_authenticated_audio_socket(channel_id, parent_channel_id, &relay_url, &keys, None)
-            .await?;
+    let (ws_tx, ws_rx, _peer_index, initial_peers) = connect_authenticated_audio_socket(
+        channel_id,
+        parent_channel_id,
+        &relay_url,
+        &auth_url,
+        &keys,
+        None,
+    )
+    .await?;
 
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
@@ -322,10 +336,15 @@ pub(crate) async fn connect_tts_audio_publisher(
     local_tts_publishers: super::tts::LocalTtsPublishers,
 ) -> Result<super::tts::TtsAudioPublisher, String> {
     let relay_url = crate::relay::relay_ws_url_with_override(state);
+    let auth_url = huddle_auth_url(
+        &relay_url,
+        crate::relay::workspace_canonical_host(state).as_deref(),
+    );
     let (ws_tx, ws_rx, peer_index, _) = connect_authenticated_audio_socket(
         channel_id,
         parent_channel_id,
         &relay_url,
+        &auth_url,
         keys,
         auth_tag_json,
     )
@@ -709,5 +728,32 @@ mod tests {
             7,
         );
         assert_eq!(queue.len(), 1, "cancelled epoch must not enqueue");
+    }
+
+    #[test]
+    fn huddle_auth_url_uses_dntls_origin_not_loopback() {
+        assert_eq!(
+            huddle_auth_url("ws://127.0.0.1:60578", Some("buzz.dntls")),
+            "wss://buzz.dntls"
+        );
+        assert_eq!(
+            huddle_auth_url("ws://127.0.0.1:60578", None),
+            "ws://127.0.0.1:60578"
+        );
+    }
+
+    #[test]
+    fn huddle_auth_event_relay_tag_is_canonical_origin() {
+        let keys = nostr::Keys::generate();
+        let auth_url = huddle_auth_url("ws://127.0.0.1:60578", Some("buzz.dntls"));
+        let event =
+            build_audio_auth_event(&keys, &auth_url, "challenge", None).expect("sign huddle AUTH");
+        let relay = event
+            .tags
+            .find(nostr::TagKind::Relay)
+            .and_then(|tag| tag.content())
+            .expect("relay tag");
+        assert_eq!(relay, "wss://buzz.dntls");
+        assert!(!relay.contains("127.0.0.1"));
     }
 }

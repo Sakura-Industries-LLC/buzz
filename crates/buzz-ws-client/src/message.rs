@@ -168,6 +168,11 @@ pub fn parse_relay_message(text: &str) -> Result<RelayMessage, WsClientError> {
 
 /// Builds a NIP-42 AUTH event, optionally injecting a NIP-OA auth tag.
 ///
+/// `relay_url` is the NIP-42 `relay` tag, not necessarily the WebSocket
+/// transport. Callers that reach a DNTLS community through a loopback
+/// connector must pass `wss://<dntls name>` here; passing `ws://127.0.0.1:<port>`
+/// is rejected by the relay as `relay url mismatch`.
+///
 /// The `auth_tag` parameter allows callers to attach a workspace-scoped
 /// authorization tag (e.g. `["auth", "<token>"]`) alongside the standard
 /// relay and challenge tags required by NIP-42.
@@ -187,4 +192,34 @@ pub fn build_auth_event(
     builder
         .sign_with_keys(keys)
         .map_err(|e| WsClientError::EventBuilder(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr::TagKind;
+
+    fn relay_tag(event: &Event) -> String {
+        event
+            .tags
+            .find(TagKind::Relay)
+            .and_then(|tag| tag.content().map(str::to_string))
+            .expect("AUTH event must carry a relay tag")
+    }
+
+    #[test]
+    fn auth_event_relay_tag_is_the_given_url() {
+        let keys = Keys::generate();
+        let event = build_auth_event("challenge", "wss://buzz.dntls", &keys, None)
+            .expect("sign AUTH");
+        assert_eq!(relay_tag(&event), "wss://buzz.dntls");
+    }
+
+    #[test]
+    fn auth_event_does_not_rewrite_a_loopback_transport_url() {
+        let keys = Keys::generate();
+        let event = build_auth_event("challenge", "ws://127.0.0.1:60578", &keys, None)
+            .expect("sign AUTH");
+        assert_eq!(relay_tag(&event), "ws://127.0.0.1:60578");
+    }
 }

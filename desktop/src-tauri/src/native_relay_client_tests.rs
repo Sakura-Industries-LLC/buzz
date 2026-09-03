@@ -799,10 +799,10 @@ async fn a_stale_finite_request_cannot_displace_the_new_scopes_session() {
     let scope_b = (scope_url(10), Keys::generate());
 
     let archive_a = client
-        .ensure_session(scope_a.0.clone(), scope_a.1.clone())
+        .ensure_session(scope_a.0.clone(), scope_a.0.clone(), scope_a.1.clone())
         .await;
     let archive_b = client
-        .ensure_session(scope_b.0.clone(), scope_b.1.clone())
+        .ensure_session(scope_b.0.clone(), scope_b.0.clone(), scope_b.1.clone())
         .await;
     assert!(
         archive_a.cancel.is_cancelled(),
@@ -810,7 +810,9 @@ async fn a_stale_finite_request_cannot_displace_the_new_scopes_session() {
     );
 
     // Scope A's in-flight catalog/catch-up command, resuming late.
-    let stale = client.session(scope_a.0.clone(), scope_a.1.clone()).await;
+    let stale = client
+        .session(scope_a.0.clone(), scope_a.0.clone(), scope_a.1.clone())
+        .await;
 
     assert!(
         !archive_b.cancel.is_cancelled(),
@@ -849,8 +851,12 @@ async fn a_same_scope_lease_shares_the_installed_session_and_never_ends_it() {
     let client = NativeRelayClient::default();
     let (relay_url, keys) = (scope_url(11), Keys::generate());
 
-    let archive = client.ensure_session(relay_url.clone(), keys.clone()).await;
-    let lease = client.session(relay_url.clone(), keys.clone()).await;
+    let archive = client
+        .ensure_session(relay_url.clone(), relay_url.clone(), keys.clone())
+        .await;
+    let lease = client
+        .session(relay_url.clone(), relay_url.clone(), keys.clone())
+        .await;
     assert!(
         Arc::ptr_eq(&lease.session, &archive),
         "a same-scope finite request must multiplex over the installed socket \
@@ -878,7 +884,9 @@ async fn the_first_lease_installs_a_session_the_archive_then_reuses() {
     let client = NativeRelayClient::default();
     let (relay_url, keys) = (scope_url(12), Keys::generate());
 
-    let lease = client.session(relay_url.clone(), keys.clone()).await;
+    let lease = client
+        .session(relay_url.clone(), relay_url.clone(), keys.clone())
+        .await;
     let leased = lease.handle();
     drop(lease);
     assert!(
@@ -887,10 +895,24 @@ async fn the_first_lease_installs_a_session_the_archive_then_reuses() {
          session the archive is about to reuse"
     );
 
-    let archive = client.ensure_session(relay_url, keys).await;
+    let archive = client
+        .ensure_session(relay_url.clone(), relay_url, keys)
+        .await;
     assert!(
         Arc::ptr_eq(&archive, &leased),
         "the archive start must reuse the installed session rather than \
          replacing an identically scoped one"
+    );
+}
+
+#[test]
+fn native_session_auth_url_uses_dntls_origin_not_loopback() {
+    assert_eq!(
+        crate::relay::rewrite_url_for_auth("ws://127.0.0.1:60578", Some("buzz.dntls")),
+        "wss://buzz.dntls"
+    );
+    assert_eq!(
+        crate::relay::rewrite_url_for_auth("ws://127.0.0.1:60578", None),
+        "ws://127.0.0.1:60578"
     );
 }

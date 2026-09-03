@@ -1,5 +1,6 @@
 use super::{
-    pairing_relay_from_nip11, probe_pairing_relay, resolve_pairing_relay_url, PairingRelay,
+    pairing_auth_url, pairing_relay_from_nip11, probe_pairing_relay, resolve_pairing_relay_url,
+    PairingRelay,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -101,4 +102,20 @@ fn main_relay_pairing_uses_main_relay_url() {
     .expect("resolve main pairing relay");
 
     assert_eq!(resolved, "wss://sprout-oss.stage.blox.sqprod.co");
+}
+
+#[test]
+fn pairing_auth_url_uses_dntls_origin_not_loopback() {
+    assert_eq!(
+        pairing_auth_url("ws://127.0.0.1:60578", Some("buzz.dntls")),
+        "wss://buzz.dntls"
+    );
+}
+
+#[test]
+fn pairing_auth_url_keeps_ordinary_transport_url() {
+    assert_eq!(
+        pairing_auth_url("ws://127.0.0.1:3000", None),
+        "ws://127.0.0.1:3000"
+    );
 }
