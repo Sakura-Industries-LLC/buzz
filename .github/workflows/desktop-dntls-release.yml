@@ -14,7 +14,10 @@ on:
         type: string
   push:
     tags:
-      - 'desktop-dntls-v[0-9]*'
+      # <component>/vX.Y.Z: the release suite derives the version from the tag's
+      # last segment and publishes under buzz-dntls/vX.Y.Z. Prereleases are
+      # refused by the publisher, so rehearse with publish-object-store: false.
+      - 'desktop-dntls/v[0-9]*'
 
 permissions:
   contents: read
@@ -47,7 +50,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$GITHUB_REF_TYPE" == 'tag' ]]; then
-            version="${GITHUB_REF_NAME#desktop-dntls-v}"
+            version="${GITHUB_REF_NAME#desktop-dntls/v}"
           else
             version="$INPUT_VERSION"
           fi
@@ -56,7 +59,7 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=desktop-dntls-v${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=desktop-dntls/v${version}" >> "$GITHUB_OUTPUT"
 
       - name: Create the release
         env:
