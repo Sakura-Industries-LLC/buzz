@@ -427,9 +427,7 @@ jobs:
       endpoint: https://objects.dntls.net
       bucket: releases
       region: garage
-      # false verifies the handoff and the bundle without uploading; flip to true
-      # once a tag has proven the bundle shape.
-      publish-object-store: false
+      publish-object-store: true
     secrets:
       object-store-access-key-id: ${{ secrets.OBJECT_STORE_ACCESS_KEY_ID }}
       object-store-secret-access-key: ${{ secrets.OBJECT_STORE_SECRET_ACCESS_KEY }}
