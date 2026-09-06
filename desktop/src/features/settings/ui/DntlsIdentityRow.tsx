@@ -2,11 +2,17 @@ import * as React from "react";
 
 import {
   dntlsCredentialsStatus,
-  importDntlsCredentials,
   removeDntlsCredentials,
   type DntlsCredentialsStatus,
 } from "@/features/communities/dntlsConnector";
+import { DntlsIdentityPicker } from "@/features/communities/ui/DntlsIdentityPicker";
 import { Button } from "@/shared/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/shared/ui/dialog";
 
 function formatStatus(status: DntlsCredentialsStatus | null): string {
   if (!status?.name) return "not set";
@@ -19,6 +25,8 @@ export function DntlsIdentityRow() {
   );
   const [error, setError] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState(false);
+  const [pickerOpen, setPickerOpen] = React.useState(false);
+  const [reconnectHint, setReconnectHint] = React.useState(false);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -40,26 +48,10 @@ export function DntlsIdentityRow() {
     };
   }, []);
 
-  async function handleReplace() {
-    setBusy(true);
-    setError(null);
-    try {
-      const imported = await importDntlsCredentials();
-      if (imported) setStatus(imported);
-    } catch (replaceError) {
-      setError(
-        replaceError instanceof Error
-          ? replaceError.message
-          : "Could not replace DNTLS credentials.",
-      );
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function handleRemove() {
     setBusy(true);
     setError(null);
+    setReconnectHint(false);
     try {
       await removeDntlsCredentials();
       setStatus({ name: null });
@@ -85,7 +77,10 @@ export function DntlsIdentityRow() {
             className="rounded-full"
             data-testid="profile-dntls-identity-replace"
             disabled={busy}
-            onClick={() => void handleReplace()}
+            onClick={() => {
+              setError(null);
+              setPickerOpen(true);
+            }}
             type="button"
             variant="secondary"
           >
@@ -105,9 +100,39 @@ export function DntlsIdentityRow() {
           ) : null}
         </div>
       </div>
+      {reconnectHint ? (
+        <p className="mt-2 text-sm text-muted-foreground">
+          DNTLS communities reconnect with this name the next time you launch
+          Buzz.
+        </p>
+      ) : null}
       {error ? (
         <p className="mt-2 text-sm text-destructive">{error}</p>
       ) : null}
+      <Dialog
+        onOpenChange={(open) => {
+          if (!open) setPickerOpen(false);
+        }}
+        open={pickerOpen}
+      >
+        <DialogContent
+          className="max-w-lg"
+          data-testid="dntls-identity-picker-dialog"
+        >
+          <DialogTitle>Choose your DNTLS name</DialogTitle>
+          <DialogDescription>
+            Buzz will use this name when you join DNTLS communities.
+          </DialogDescription>
+          <DntlsIdentityPicker
+            onBound={(name) => {
+              setStatus({ name });
+              setReconnectHint(true);
+              setPickerOpen(false);
+            }}
+            onCancel={() => setPickerOpen(false)}
+          />
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

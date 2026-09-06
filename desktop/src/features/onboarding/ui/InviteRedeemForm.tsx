@@ -15,12 +15,20 @@ import {
 import { normalizeRelayUrl } from "@/features/communities/relayProbe";
 import {
   dntlsCommunityName,
-  ensureDntlsCredentials,
+  dntlsCredentialsStatus,
+  needsCredentialsImport,
   startDntlsConnector,
 } from "@/features/communities/dntlsConnector";
+import { DntlsIdentityPicker } from "@/features/communities/ui/DntlsIdentityPicker";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { JoinPolicyNotice } from "./JoinPolicyNotice";
@@ -90,6 +98,7 @@ export function InviteRedeemForm({
   const [agreementConfirmed, setAgreementConfirmed] = React.useState(false);
   const [policyError, setPolicyError] = React.useState<string | null>(null);
   const [isLoadingPolicy, setIsLoadingPolicy] = React.useState(false);
+  const [pickerOpen, setPickerOpen] = React.useState(false);
   const shouldReduceMotion = useReducedMotion();
 
   const isAddCommunity = variant === "add-community";
@@ -158,54 +167,79 @@ export function InviteRedeemForm({
   const showInvalidInviteTip =
     isOnboardingSpotlight && inviteInput.trim().length > 0 && !canSubmit;
 
+  const connectNativeRelay = React.useCallback(
+    async (name: string | null) => {
+      setPolicyError(null);
+      setIsLoadingPolicy(true);
+      try {
+        const ready = name ? await startDntlsConnector(name) : null;
+        const relayWsUrl = ready?.relayUrl ?? normalizedRelayUrl;
+        if (!relayWsUrl) return;
+        const policy = await getJoinPolicy(relayWsUrl, "native");
+        if (!policy) {
+          onConnect?.(relayWsUrl, ready?.community);
+          return;
+        }
+
+        if (
+          !joinPolicy ||
+          joinPolicy.version !== policy.version ||
+          policyTarget?.relayWsUrl !== relayWsUrl ||
+          policyTarget.code !== undefined
+        ) {
+          setJoinPolicy(policy);
+          setPolicyTarget({ relayWsUrl });
+          setAgeConfirmed(false);
+          setAgreementConfirmed(false);
+          return;
+        }
+
+        if (policy.ageAttestationRequired && !ageConfirmed) {
+          setPolicyError("Confirm that you are at least 18 years old.");
+          return;
+        }
+        if (
+          (policy.termsMarkdown || policy.privacyMarkdown) &&
+          !agreementConfirmed
+        ) {
+          setPolicyError("Agree to the Terms of Service and Privacy Policy.");
+          return;
+        }
+
+        onConnect?.(relayWsUrl, ready?.community);
+      } catch (policyFetchError) {
+        setPolicyError(inviteErrorMessage(policyFetchError));
+      } finally {
+        setIsLoadingPolicy(false);
+      }
+    },
+    [
+      ageConfirmed,
+      agreementConfirmed,
+      joinPolicy,
+      normalizedRelayUrl,
+      onConnect,
+      policyTarget,
+    ],
+  );
+
   const handleSubmit = React.useCallback(
     async (event: React.FormEvent) => {
       event.preventDefault();
       if (dntlsName || normalizedRelayUrl) {
-        setPolicyError(null);
-        setIsLoadingPolicy(true);
-        try {
-          if (dntlsName && !(await ensureDntlsCredentials())) return;
-          const ready = dntlsName ? await startDntlsConnector(dntlsName) : null;
-          const relayWsUrl = ready?.relayUrl ?? normalizedRelayUrl;
-          if (!relayWsUrl) return;
-          const policy = await getJoinPolicy(relayWsUrl, "native");
-          if (!policy) {
-            onConnect?.(relayWsUrl, ready?.community);
+        if (dntlsName) {
+          let missing = true;
+          try {
+            missing = needsCredentialsImport(await dntlsCredentialsStatus());
+          } catch {
+            missing = true;
+          }
+          if (missing) {
+            setPickerOpen(true);
             return;
           }
-
-          if (
-            !joinPolicy ||
-            joinPolicy.version !== policy.version ||
-            policyTarget?.relayWsUrl !== relayWsUrl ||
-            policyTarget.code !== undefined
-          ) {
-            setJoinPolicy(policy);
-            setPolicyTarget({ relayWsUrl });
-            setAgeConfirmed(false);
-            setAgreementConfirmed(false);
-            return;
-          }
-
-          if (policy.ageAttestationRequired && !ageConfirmed) {
-            setPolicyError("Confirm that you are at least 18 years old.");
-            return;
-          }
-          if (
-            (policy.termsMarkdown || policy.privacyMarkdown) &&
-            !agreementConfirmed
-          ) {
-            setPolicyError("Agree to the Terms of Service and Privacy Policy.");
-            return;
-          }
-
-          onConnect?.(relayWsUrl, ready?.community);
-        } catch (policyFetchError) {
-          setPolicyError(inviteErrorMessage(policyFetchError));
-        } finally {
-          setIsLoadingPolicy(false);
         }
+        await connectNativeRelay(dntlsName);
         return;
       }
       if (!parsedInvite) return;
@@ -265,11 +299,11 @@ export function InviteRedeemForm({
     [
       ageConfirmed,
       agreementConfirmed,
-      dntlsName,
       bareCodeRelayUrl,
+      connectNativeRelay,
+      dntlsName,
       joinPolicy,
       normalizedRelayUrl,
-      onConnect,
       onRedeem,
       parsedInvite,
       policyTarget,
@@ -360,6 +394,7 @@ export function InviteRedeemForm({
   );
 
   return (
+    <>
     <form
       className={cn(
         "flex w-full flex-col",
@@ -556,5 +591,29 @@ export function InviteRedeemForm({
         </>
       )}
     </form>
+    <Dialog
+      onOpenChange={(open) => {
+        if (!open) setPickerOpen(false);
+      }}
+      open={pickerOpen}
+    >
+      <DialogContent
+        className="max-w-lg"
+        data-testid="dntls-identity-picker-dialog"
+      >
+        <DialogTitle>Choose your DNTLS name</DialogTitle>
+        <DialogDescription>
+          Buzz will use this name when you join DNTLS communities.
+        </DialogDescription>
+        <DntlsIdentityPicker
+          onBound={() => {
+            setPickerOpen(false);
+            if (dntlsName) void connectNativeRelay(dntlsName);
+          }}
+          onCancel={() => setPickerOpen(false)}
+        />
+      </DialogContent>
+    </Dialog>
+    </>
   );
 }
