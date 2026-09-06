@@ -24,7 +24,7 @@ use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::TlsConnector;
 use url::{Host, Url};
 
-use dntls_sdk::portal::{BuzzEndpoint, RecordFields};
+use dntls_sdk::portal::{AddressFamily, BuzzEndpoint, RecordFields};
 use dntls_sdk::{identity, resolver, tls};
 
 use crate::dntls_credentials::{credentials_bundle_path, credentials_data_dir};
@@ -49,8 +49,10 @@ pub(crate) struct DntlsConnectors {
     running: Arc<Mutex<HashMap<String, RunningConnector>>>,
 }
 
-impl Drop for DntlsConnectors {
-    fn drop(&mut self) {
+impl DntlsConnectors {
+    /// Aborts every running connector so the next community start presents
+    /// the credentials stored at that time.
+    pub(crate) fn reset(&self) {
         let Ok(mut running) = self.running.lock() else {
             return;
         };
@@ -58,6 +60,12 @@ impl Drop for DntlsConnectors {
             connector.task.abort();
         }
         running.clear();
+    }
+}
+
+impl Drop for DntlsConnectors {
+    fn drop(&mut self) {
+        self.reset();
     }
 }
 
@@ -201,10 +209,13 @@ async fn discover(
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| "BUZZ_DNTLS_ENDPOINT_OVERRIDE must be <ip>:<port>".to_string())?;
         endpoints = vec![BuzzEndpoint {
-            family: String::new(),
+            family: match addr.ip() {
+                IpAddr::V4(_) => AddressFamily::Ipv4,
+                IpAddr::V6(_) => AddressFamily::Ipv6,
+            },
             address: addr.ip().to_string(),
-            port: addr.port(),
-            priority: 0,
+            port: std::num::NonZeroU16::new(addr.port()),
+            priority: None,
         }];
     }
     let mut failures = Vec::new();

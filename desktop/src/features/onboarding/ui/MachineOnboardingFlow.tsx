@@ -8,6 +8,11 @@ import {
   persistCurrentIdentity,
 } from "@/shared/api/tauriIdentity";
 import type { IdentityStorage } from "@/shared/api/types";
+import {
+  dntlsCredentialsStatus,
+  needsCredentialsImport,
+} from "@/features/communities/dntlsConnector";
+import { DntlsIdentityPicker } from "@/features/communities/ui/DntlsIdentityPicker";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -48,6 +53,7 @@ import type { DefaultConfigDraft } from "./types";
 export type MachineOnboardingPage =
   | "identity"
   | "key-import"
+  | "dntls"
   | "backup"
   | "setup"
   | "config";
@@ -120,11 +126,30 @@ export function MachineOnboardingFlow({
   // Owned here so switching between the yellow onboarding view and the dark
   // security subview keeps the created backup, password, and test progress.
   const backupSession = useEncryptedBackupSession();
+  const [dntlsContinuePage, setDntlsContinuePage] = React.useState<
+    "backup" | "setup"
+  >("backup");
   const reduceMotion = useReducedMotion() ?? false;
   const isSecuritySubview = page === "backup" && backupSubview !== "created";
   const handleReadyRuntimeIdsChange = React.useCallback(
     (runtimeIds: readonly string[]) => {
       setReadyRuntimeIds(Array.from(new Set(runtimeIds)));
+    },
+    [],
+  );
+  const goToDntlsOrContinue = React.useCallback(
+    async (next: "backup" | "setup") => {
+      setDntlsContinuePage(next);
+      try {
+        const status = await dntlsCredentialsStatus();
+        if (!needsCredentialsImport(status)) {
+          setPage(next);
+          return;
+        }
+      } catch {
+        // Probe failed; let the user choose a name.
+      }
+      setPage("dntls");
     },
     [],
   );
@@ -141,7 +166,7 @@ export function MachineOnboardingFlow({
       setTransitionDirection("forward");
       setReturningFromSecurity(false);
       setBackupSubview("created");
-      setPage("backup");
+      await goToDntlsOrContinue("backup");
     } catch (cause) {
       setError(
         cause instanceof Error ? cause.message : "Failed to load identity",
@@ -149,7 +174,7 @@ export function MachineOnboardingFlow({
     } finally {
       setIsPending(false);
     }
-  }, [queryClient]);
+  }, [goToDntlsOrContinue, queryClient]);
 
   const loadRecoveredIdentity = React.useCallback(async () => {
     setIsPending(true);
@@ -162,7 +187,7 @@ export function MachineOnboardingFlow({
       setSelectedPubkey(identity.pubkey);
       setIdentityStorage(identity.storage);
       setTransitionDirection("forward");
-      setPage("setup");
+      await goToDntlsOrContinue("setup");
     } catch (cause) {
       setError(
         cause instanceof Error ? cause.message : "Failed to load identity",
@@ -170,7 +195,7 @@ export function MachineOnboardingFlow({
     } finally {
       setIsPending(false);
     }
-  }, [continueWithRecoveredIdentity, queryClient]);
+  }, [continueWithRecoveredIdentity, goToDntlsOrContinue, queryClient]);
 
   const replaceLostIdentity = React.useCallback(async () => {
     const confirmed = window.confirm(
@@ -189,7 +214,7 @@ export function MachineOnboardingFlow({
       setTransitionDirection("forward");
       setReturningFromSecurity(false);
       setBackupSubview("created");
-      setPage("backup");
+      await goToDntlsOrContinue("backup");
     } catch (cause) {
       setError(
         cause instanceof Error ? cause.message : "Failed to save identity",
@@ -197,7 +222,7 @@ export function MachineOnboardingFlow({
     } finally {
       setIsPending(false);
     }
-  }, [queryClient]);
+  }, [goToDntlsOrContinue, queryClient]);
 
   const importExistingIdentity = React.useCallback(
     async (nsec: string, password?: string) => {
@@ -207,9 +232,9 @@ export function MachineOnboardingFlow({
       setIdentityWasImported(true);
       setSelectedPubkey(identity.pubkey);
       setTransitionDirection("forward");
-      setPage("setup");
+      await goToDntlsOrContinue("setup");
     },
-    [continueWithIdentity, queryClient],
+    [continueWithIdentity, goToDntlsOrContinue, queryClient],
   );
 
   const backFromKeyImport = React.useCallback(() => {
@@ -256,30 +281,39 @@ export function MachineOnboardingFlow({
     page === "key-import" &&
     (!identityLost || keyImportStage === "backup-password")
       ? { disabled: isKeyImporting, onClick: backFromKeyImport }
-      : page === "backup" && backupSubview !== "created"
+      : page === "dntls"
         ? {
-            label: "Return to onboarding",
-            onClick: returnToCreatedKey,
-            testId: "backup-return-to-onboarding",
+            onClick: () => {
+              setTransitionDirection("backward");
+              setPage(
+                identityWasImported || identityLost ? "key-import" : "identity",
+              );
+            },
           }
-        : page === "backup"
+        : page === "backup" && backupSubview !== "created"
           ? {
-              onClick: () => {
-                setTransitionDirection("backward");
-                setPage("identity");
-              },
+              label: "Return to onboarding",
+              onClick: returnToCreatedKey,
+              testId: "backup-return-to-onboarding",
             }
-          : page === "setup"
-            ? { onClick: backFromSetup }
-            : page === "config"
-              ? {
-                  disabled: isDefaultConfigSaving,
-                  onClick: () => {
-                    setTransitionDirection("backward");
-                    setPage("setup");
-                  },
-                }
-              : undefined;
+          : page === "backup"
+            ? {
+                onClick: () => {
+                  setTransitionDirection("backward");
+                  setPage("identity");
+                },
+              }
+            : page === "setup"
+              ? { onClick: backFromSetup }
+              : page === "config"
+                ? {
+                    disabled: isDefaultConfigSaving,
+                    onClick: () => {
+                      setTransitionDirection("backward");
+                      setPage("setup");
+                    },
+                  }
+                : undefined;
 
   return (
     <div
@@ -497,6 +531,32 @@ export function MachineOnboardingFlow({
                   </div>
                 </DialogContent>
               </Dialog>
+            </OnboardingSlideTransition>
+          ) : page === "dntls" ? (
+            <OnboardingSlideTransition
+              className="flex min-h-[calc(100dvh-13.25rem)] w-full max-w-[720px] flex-col items-center text-center"
+              data-testid="onboarding-page-dntls"
+              direction={transitionDirection}
+              transitionKey={`machine-dntls-${transitionDirection}`}
+            >
+              <h1 className="text-title font-normal text-foreground">
+                Choose your DNTLS name
+              </h1>
+              <p className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
+                Buzz will use this name when you join DNTLS communities.
+              </p>
+              <div className="mt-8 w-full max-w-[500px] text-left">
+                <DntlsIdentityPicker
+                  onBound={() => {
+                    setTransitionDirection("forward");
+                    setPage(dntlsContinuePage);
+                  }}
+                  onSkip={() => {
+                    setTransitionDirection("forward");
+                    setPage(dntlsContinuePage);
+                  }}
+                />
+              </div>
             </OnboardingSlideTransition>
           ) : page === "backup" ? (
             backupSubview === "password" ? (

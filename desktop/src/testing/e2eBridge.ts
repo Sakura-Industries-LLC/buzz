@@ -220,7 +220,7 @@ type E2eConfig = {
     } | null;
     /**
      * Stored DNTLS identity name. Omit to pretend a credentials file is
-     * already present; set `null` to exercise the first-run picker path.
+     * already present; set `null` to exercise the first-run resolver path.
      */
     dntlsCredentialsName?: string | null;
     /** Delay Builderlab login completion so cancellation/retry UI can be tested. */
@@ -11558,15 +11558,51 @@ export function maybeInstallE2eTauriMocks() {
             : "demo-alice.dntls";
         return { name };
       }
-      case "import_dntls_credentials": {
-        const name = "demo-alice.dntls";
+      case "dntls_resolver_status":
+        return {
+          state: "ready",
+          attested: true,
+          socket: "/tmp/dntls-resolver.sock",
+        };
+      case "list_dntls_identities":
+        return [
+          {
+            name: "demo-alice.dntls",
+            fqdn: "demo-alice.dntls",
+            has_private_identity: true,
+            active: true,
+          },
+          {
+            name: "demo-bob.dntls",
+            fqdn: "demo-bob.dntls",
+            has_private_identity: true,
+            active: false,
+          },
+        ];
+      case "bind_dntls_identity": {
+        if (
+          !payload ||
+          typeof payload !== "object" ||
+          !("name" in payload) ||
+          typeof payload.name !== "string"
+        ) {
+          throw {
+            code: "invalid_request",
+            message: "Missing DNTLS name.",
+          };
+        }
+        const selected = payload.name;
+        const fqdn = selected.endsWith(".dntls")
+          ? selected
+          : `${selected}.dntls`;
+        const name = `buzz.${fqdn}`;
         if (activeConfig) {
           activeConfig.mock = {
             ...activeConfig.mock,
             dntlsCredentialsName: name,
           };
         }
-        return { name };
+        return { name, scope: "subname" };
       }
       case "remove_dntls_credentials": {
         if (activeConfig) {

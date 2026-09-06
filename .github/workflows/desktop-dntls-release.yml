@@ -273,6 +273,11 @@ jobs:
           KEY_PATH: ${{ steps.notary.outputs.key_path }}
         run: rm -f "$KEY_PATH"
 
+      # The DNTLS Local Trust Resolver identifies Buzz by its signing subject
+      # (Team ID + identifier) plus the attestation marker committed at
+      # desktop/src-tauri/dntls-attest.marker, which was minted for exactly
+      # that subject. A signing change or a duplicated marker would leave the
+      # shipped app unable to onboard, so both are checked here.
       - name: Verify the signed app
         if: runner.os == 'macOS'
         run: |
@@ -281,6 +286,12 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
           spctl --assess --type execute --verbose=4 "$app"
           xcrun stapler validate "$app"
+          exe="$app/Contents/MacOS/buzz-desktop"
+          markers="$(grep -o --binary-files=text 'DNTLS-ATTEST-BEGIN' "$exe" | wc -l | tr -d ' ')"
+          [[ "$markers" == "1" ]] || { echo "expected exactly one DNTLS attestation marker, found $markers"; exit 1; }
+          grep -q --binary-files=text -F "$(tr -d '\n' < desktop/src-tauri/dntls-attest.marker)" "$exe"
+          codesign -dv --verbose=2 "$app" 2>&1 | grep -qx 'TeamIdentifier=7MN6B2QY4W'
+          codesign -dv --verbose=2 "$app" 2>&1 | grep -qx 'Identifier=net.dntls.buzz'
 
   # Tauri's updater reads one manifest per release. Assembling it here, from the
   # signatures the platform jobs uploaded, keeps all four platforms in the file.
