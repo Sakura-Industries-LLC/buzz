@@ -11556,7 +11556,9 @@ export function maybeInstallE2eTauriMocks() {
           mock && Object.hasOwn(mock, "dntlsCredentialsName")
             ? (mock.dntlsCredentialsName ?? null)
             : "demo-alice.dntls";
-        return { name };
+        const userName =
+          name?.startsWith("buzz.") ? name.slice("buzz.".length) : name;
+        return { name, user_name: userName };
       }
       case "dntls_resolver_status":
         return {

@@ -54,7 +54,7 @@ export function DntlsIdentityRow() {
     setReconnectHint(false);
     try {
       await removeDntlsCredentials();
-      setStatus({ name: null });
+      setStatus({ name: null, user_name: null });
     } catch (removeError) {
       setError(
         removeError instanceof Error
@@ -122,8 +122,8 @@ export function DntlsIdentityRow() {
             Buzz will use this name when you join DNTLS communities.
           </DialogDescription>
           <DntlsIdentityPicker
-            onBound={(name) => {
-              setStatus({ name });
+            onBound={() => {
+              void dntlsCredentialsStatus().then(setStatus);
               setReconnectHint(true);
               setPickerOpen(false);
             }}

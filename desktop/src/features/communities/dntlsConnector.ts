@@ -6,7 +6,13 @@ export type DntlsConnectorReady = {
 };
 
 export type DntlsCredentialsStatus = {
+  /** FQDN the stored bundle carries, or null when none is stored. */
   name: string | null;
+  /**
+   * The name the user chose: `name` without Buzz's own label when the
+   * resolver gave Buzz a subname, otherwise `name` itself.
+   */
+  user_name: string | null;
 };
 
 export type DntlsResolverStatus = {
