@@ -170,7 +170,7 @@ export function DntlsIdentityPicker({
     }
   }, []);
 
-  const useSelectedName = React.useCallback(
+  const bindSelectedName = React.useCallback(
     async (identities: DntlsIdentity[], selectedName: string) => {
       const selected = identities.find(
         (identity) => identity.name === selectedName,
@@ -392,7 +392,7 @@ export function DntlsIdentityPicker({
             }
             onClick={() => {
               if (phase.kind === "list" && phase.selectedName) {
-                void useSelectedName(phase.identities, phase.selectedName);
+                void bindSelectedName(phase.identities, phase.selectedName);
               }
             }}
             type="button"
