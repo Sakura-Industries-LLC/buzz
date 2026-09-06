@@ -171,7 +171,7 @@ type MockBridgeOptions = {
   } | null;
   /**
    * Stored DNTLS identity name. Omit to pretend a credentials file is already
-   * present; set `null` to exercise the first-run picker path.
+   * present; set `null` to exercise the first-run resolver path.
    */
   dntlsCredentialsName?: string | null;
   /** Bound Builderlab Nostr identity. Null/omitted = not linked yet. */

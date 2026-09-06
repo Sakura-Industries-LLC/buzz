@@ -98,7 +98,7 @@ test("joins by exact DNTLS community name", async ({ page }) => {
     .toContain('"dntlsName":"community.example.dntls"');
 });
 
-test("prompts for credentials before the first DNTLS community", async ({
+test("prompts for a DNTLS name before the first DNTLS community", async ({
   page,
 }) => {
   await page.evaluate(() => {
@@ -112,19 +112,32 @@ test("prompts for credentials before the first DNTLS community", async ({
     .fill("community.example.dntls");
   await page.getByTestId("invite-redeem-submit").click();
 
+  const picker = page.getByTestId("dntls-identity-picker");
+  await expect(picker).toBeVisible();
+  await picker.getByTestId("dntls-identity-picker-show-names").click();
+  await picker
+    .getByTestId("dntls-identity-picker-name-demo-alice.dntls")
+    .click();
+  await picker.getByTestId("dntls-identity-picker-use-name").click();
+
   await expect
     .poll(() =>
       page.evaluate((commands) => {
         const payloads = window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [];
-        const importIndex = payloads.findIndex(
-          (entry) => entry.command === commands.importCredentials,
+        const listIndex = payloads.findIndex(
+          (entry) => entry.command === commands.listIdentities,
+        );
+        const bindIndex = payloads.findIndex(
+          (entry) =>
+            entry.command === commands.bindIdentity &&
+            entry.payload?.name === "demo-alice.dntls",
         );
         const startIndex = payloads.findIndex(
           (entry) =>
             entry.command === commands.startConnector &&
             entry.payload?.community === "community.example.dntls",
         );
-        return importIndex >= 0 && startIndex > importIndex;
+        return listIndex >= 0 && bindIndex > listIndex && startIndex > bindIndex;
       }, DNTLS_DESKTOP_COMMANDS),
     )
     .toBe(true);

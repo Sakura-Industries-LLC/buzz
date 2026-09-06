@@ -13,7 +13,9 @@ const COMMUNITY_HOST = process.env.BUZZ_COMMUNITY_HOST ?? "localhost:3000";
 export const DNTLS_DESKTOP_COMMANDS = {
   startConnector: "start_dntls_connector",
   credentialsStatus: "dntls_credentials_status",
-  importCredentials: "import_dntls_credentials",
+  resolverStatus: "dntls_resolver_status",
+  listIdentities: "list_dntls_identities",
+  bindIdentity: "bind_dntls_identity",
   removeCredentials: "remove_dntls_credentials",
 } as const;
 
