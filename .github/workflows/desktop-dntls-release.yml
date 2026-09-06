@@ -4,6 +4,10 @@ name: Desktop DNTLS Release
 # Upstream release.yml is tied to Block's codesign infrastructure, so this
 # workflow signs and notarizes with the org's Apple credentials instead and
 # lets tauri-action upload the bundles.
+#
+# Windows is not built: the client obtains its DNTLS credentials from the
+# DNTLS Local Trust Resolver's Unix socket, and the resolver has no Windows
+# build.
 
 on:
   workflow_dispatch:
@@ -75,11 +79,10 @@ jobs:
           notes="$(mktemp)"
           cat > "$notes" <<EOF
           Buzz DNTLS ${VERSION}: a Buzz desktop client that joins communities by
-          their DNTLS name.
+          their DNTLS name, using the DNTLS Local Trust Resolver for its identity.
 
           Downloads: macOS \`.dmg\` for Apple silicon and Intel, Linux
-          \`.AppImage\` or \`.deb\`, Windows setup \`.exe\`. The macOS builds are
-          signed and notarized; the Windows installer is unsigned.
+          \`.AppImage\` or \`.deb\`. The macOS builds are signed and notarized.
 
           \`latest.json\` serves the in-app updater.
           EOF
@@ -108,10 +111,6 @@ jobs:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             bundles: '--bundles deb,appimage'
-          - runner: windows-latest
-            target: x86_64-pc-windows-msvc
-            # WiX is unproven here; the NSIS installer is what upstream ships.
-            bundles: '--bundles nsis'
     defaults:
       run:
         shell: bash
@@ -216,12 +215,8 @@ jobs:
       - name: Build sidecars
         run: |
           set -euo pipefail
-          packages=(-p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli)
-          # buzz-backend-kubernetes is not part of the Windows bundle.
-          if [[ "$TARGET" != *windows* ]]; then
-            packages+=(-p buzz-backend-kubernetes)
-          fi
-          cargo build --release --target "$TARGET" "${packages[@]}"
+          cargo build --release --target "$TARGET" \
+            -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli -p buzz-backend-kubernetes
           ./scripts/bundle-sidecars.sh "$TARGET"
 
       # notarytool reads the App Store Connect key from a file. The secret holds
@@ -243,8 +238,8 @@ jobs:
           openssl pkey -in "$key_path" -noout
           echo "key_path=$key_path" >> "$GITHUB_OUTPUT"
 
-      # The Apple variables are read only by the macOS bundler; Linux and
-      # Windows ignore them. Windows installers ship unsigned.
+      # The Apple variables are read only by the macOS bundler; Linux ignores
+      # them.
       - name: Build and upload the bundles
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
@@ -294,7 +289,7 @@ jobs:
           codesign -dv --verbose=2 "$app" 2>&1 | grep -qx 'Identifier=net.dntls.buzz'
 
   # Tauri's updater reads one manifest per release. Assembling it here, from the
-  # signatures the platform jobs uploaded, keeps all four platforms in the file.
+  # signatures the platform jobs uploaded, keeps every platform in the file.
   updater-manifest:
     name: Updater manifest
     needs: [setup, build]
@@ -323,7 +318,6 @@ jobs:
               *_aarch64.app.tar.gz) platform='darwin-aarch64' ;;
               *_x64.app.tar.gz) platform='darwin-x86_64' ;;
               *.AppImage | *.AppImage.tar.gz) platform='linux-x86_64' ;;
-              *.exe | *.nsis.zip) platform='windows-x86_64' ;;
               *)
                 echo "Ignoring signature for $bundle"
                 continue
@@ -338,7 +332,7 @@ jobs:
           done
 
           missing="$(jq -r \
-            '["darwin-aarch64", "darwin-x86_64", "linux-x86_64", "windows-x86_64"]
+            '["darwin-aarch64", "darwin-x86_64", "linux-x86_64"]
              - (.platforms | keys) | join(", ")' <<< "$manifest")"
           if [[ -n "$missing" ]]; then
             echo "::error::latest.json is missing platforms: ${missing}"
@@ -375,7 +369,7 @@ jobs:
           set -euo pipefail
           mkdir -p bundles
           gh release download "$TAG" -R "$GITHUB_REPOSITORY" --dir bundles \
-            --pattern '*.dmg' --pattern '*.AppImage' --pattern '*.deb' --pattern '*-setup.exe'
+            --pattern '*.dmg' --pattern '*.AppImage' --pattern '*.deb'
 
       - name: Assemble the closed bundle
         env:
@@ -395,7 +389,6 @@ jobs:
           rename "Buzz.DNTLS_${VERSION}_x64.dmg"        "buzz-dntls_${VERSION}_darwin_amd64.dmg"
           rename "Buzz.DNTLS_${VERSION}_amd64.AppImage" "buzz-dntls_${VERSION}_linux_amd64.AppImage"
           rename "Buzz.DNTLS_${VERSION}_amd64.deb"      "buzz-dntls_${VERSION}_linux_amd64.deb"
-          rename "Buzz.DNTLS_${VERSION}_x64-setup.exe"  "buzz-dntls_${VERSION}_windows_amd64.exe"
           leftover="$(ls -A bundles)"
           if [[ -n "$leftover" ]]; then
             echo "::error::Unexpected bundles were not renamed: ${leftover}"
