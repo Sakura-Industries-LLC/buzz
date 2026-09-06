@@ -141,7 +141,9 @@ test("prompts for a DNTLS name before the first DNTLS community", async ({
             entry.command === commands.startConnector &&
             entry.payload?.community === "community.example.dntls",
         );
-        return listIndex >= 0 && bindIndex > listIndex && startIndex > bindIndex;
+        return (
+          listIndex >= 0 && bindIndex > listIndex && startIndex > bindIndex
+        );
       }, DNTLS_DESKTOP_COMMANDS),
     )
     .toBe(true);

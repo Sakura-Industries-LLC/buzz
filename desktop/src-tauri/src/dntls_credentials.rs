@@ -142,9 +142,7 @@ pub(crate) fn credentials_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
 
 /// Returns the stored identity name, or `name: None` when no file is present.
 #[tauri::command]
-pub(crate) fn dntls_credentials_status(
-    app: AppHandle,
-) -> Result<DntlsCredentialsStatus, String> {
+pub(crate) fn dntls_credentials_status(app: AppHandle) -> Result<DntlsCredentialsStatus, String> {
     let path = credentials_bundle_path(&app)?;
     if !path.is_file() {
         return Ok(DntlsCredentialsStatus { name: None });

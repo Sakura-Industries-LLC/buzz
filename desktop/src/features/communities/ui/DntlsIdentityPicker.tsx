@@ -22,8 +22,7 @@ const UNRECOGNIZED_BUILD_COPY =
   "This build of Buzz cannot be recognized by the Local Trust Resolver";
 const UNRECOGNIZED_COPY =
   "The Local Trust Resolver did not recognize this copy of Buzz";
-const LIST_CONSENT_COPY =
-  "The Local Trust Resolver will ask you to allow this";
+const LIST_CONSENT_COPY = "The Local Trust Resolver will ask you to allow this";
 const BIND_CONSENT_COPY =
   "The Local Trust Resolver will ask which key to give Buzz";
 const DENIED_COPY = "You didn't allow it";
@@ -244,7 +243,10 @@ export function DntlsIdentityPicker({
   ) : null;
 
   return (
-    <div className="flex w-full flex-col gap-4" data-testid="dntls-identity-picker">
+    <div
+      className="flex w-full flex-col gap-4"
+      data-testid="dntls-identity-picker"
+    >
       {phase.kind === "probing" ? (
         <div className="flex justify-center py-6">
           <Spinner aria-label="Checking the Local Trust Resolver" />

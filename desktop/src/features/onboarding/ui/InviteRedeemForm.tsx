@@ -395,225 +395,225 @@ export function InviteRedeemForm({
 
   return (
     <>
-    <form
-      className={cn(
-        "flex w-full flex-col",
-        isOnboardingSpotlight
-          ? "relative items-center"
-          : isAddCommunity
-            ? "gap-4"
-            : "gap-3",
-      )}
-      id={formId}
-      onSubmit={handleSubmit}
-    >
-      {isOnboardingSpotlight ? (
-        <Card
-          className="w-[min(calc(100%+12rem),calc(100vw-2rem))] max-w-[1120px] translate-y-8 px-8 py-6"
-          data-testid="invite-redeem-input-frame"
-          variant="textured"
-        >
-          <div
-            className={SPOTLIGHT_TEXTURE_CONTENT_CLASS}
-            style={SPOTLIGHT_OVERFLOW_FADE}
-          >
-            <label className="block w-full" htmlFor="invite-input">
-              <span className="sr-only">Invite link or code</span>
-              <span className={ONBOARDING_KEY_ROW_CLASS}>
-                <input
-                  autoCapitalize="none"
-                  autoComplete="off"
-                  autoCorrect="off"
-                  className={cn(
-                    ONBOARDING_KEY_TEXT_CLASS,
-                    "block border-0 bg-transparent p-0 text-center shadow-none outline-none placeholder:text-[var(--buzz-onboarding-backup-ink)] placeholder:opacity-40 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
-                  )}
-                  data-testid="invite-redeem-input"
-                  disabled={isRedeeming}
-                  id="invite-input"
-                  onChange={handleInviteInputChange}
-                  placeholder={
-                    placeholder ?? "https://relay.example.com/invite/abc123"
-                  }
-                  spellCheck={false}
-                  type="text"
-                  value={inviteInput}
-                />
-              </span>
-            </label>
-          </div>
-        </Card>
-      ) : (
-        <div className="space-y-1.5 text-left">
-          <label
-            className="text-sm font-medium text-foreground"
-            htmlFor="invite-input"
-          >
-            {isAddCommunity
-              ? "Community URL, DNTLS name, or invite link"
-              : "Invite link or code"}
-          </label>
-          <Input
-            autoComplete="off"
-            autoCorrect="off"
-            autoFocus
-            className={
-              isAddCommunity
-                ? "h-11 rounded-xl border-input bg-muted/40 px-3 shadow-none transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-visible:border-muted-foreground/50 focus-visible:ring-0"
-                : "h-10 bg-background"
-            }
-            data-testid="invite-redeem-input"
-            disabled={isRedeeming}
-            id="invite-input"
-            onChange={handleInviteInputChange}
-            placeholder={
-              isAddCommunity
-                ? "community.example.com, name.dntls, or an invite link"
-                : "https://relay.example.com/invite/abc123 or paste a code"
-            }
-            spellCheck={false}
-            type="text"
-            value={inviteInput}
-          />
-        </div>
-      )}
-
-      {isOnboardingSpotlight ? (
-        <p
-          aria-hidden={!showInvalidInviteTip}
-          aria-live="polite"
-          className={cn(
-            "absolute top-[calc(100%+2rem)] mt-4 min-h-5 w-full max-w-4xl text-center text-sm text-[#717106] transition-opacity duration-150 ease-out",
-            showInvalidInviteTip ? "opacity-100" : "opacity-0",
-          )}
-          data-testid="invalid-invite-tip"
-        >
-          Please enter a valid invite link, community URL, or DNTLS name
-        </p>
-      ) : null}
-
-      {needsRelayField ? (
-        <div
-          className={cn(
-            "space-y-1.5 text-left",
-            isOnboardingSpotlight && "w-full max-w-[500px]",
-          )}
-        >
-          <label
-            className="text-sm font-medium text-foreground"
-            htmlFor="invite-relay-url"
-          >
-            Relay URL
-          </label>
-          <Input
-            className="h-10 bg-background"
-            disabled={isRedeeming}
-            id="invite-relay-url"
-            onChange={handleRelayInputChange}
-            placeholder="wss://relay.example.com"
-            type="text"
-            value={bareCodeRelayUrl}
-          />
-        </div>
-      ) : null}
-
-      {policyError ? (
-        <p className="text-center text-sm text-destructive">{policyError}</p>
-      ) : null}
-
-      {error ? (
-        <p className="text-center text-sm text-destructive">{error}</p>
-      ) : null}
-
-      <AnimatePresence initial={false}>
-        {joinPolicy && policyTarget ? (
-          <motion.div
-            animate={{
-              height: "auto",
-              marginTop: 0,
-              opacity: 1,
-              transform: "translateY(0rem)",
-            }}
-            className="overflow-hidden"
-            exit={
-              shouldReduceMotion
-                ? { height: 0, marginTop: "-0.75rem", opacity: 0 }
-                : {
-                    height: 0,
-                    marginTop: "-0.75rem",
-                    opacity: 0,
-                    transform: "translateY(-0.25rem)",
-                  }
-            }
-            initial={
-              shouldReduceMotion
-                ? false
-                : {
-                    height: 0,
-                    marginTop: "-0.75rem",
-                    opacity: 0,
-                    transform: "translateY(-0.25rem)",
-                  }
-            }
-            key={`${policyTarget.relayWsUrl}:${joinPolicy.version}`}
-            transition={
-              shouldReduceMotion
-                ? { duration: 0 }
-                : { duration: 0.22, ease: POLICY_REVEAL_EASE }
-            }
-          >
-            <JoinPolicyNotice
-              ageConfirmed={ageConfirmed}
-              agreementConfirmed={agreementConfirmed}
-              onAgeConfirmedChange={(confirmed) => {
-                setAgeConfirmed(confirmed);
-                setPolicyError(null);
-              }}
-              onAgreementConfirmedChange={(confirmed) => {
-                setAgreementConfirmed(confirmed);
-                setPolicyError(null);
-              }}
-              policy={joinPolicy}
-              relayWsUrl={policyTarget.relayWsUrl}
-            />
-          </motion.div>
-        ) : null}
-      </AnimatePresence>
-
-      {isOnboardingSpotlight ? (
-        <OnboardingFooter>{submitButton}</OnboardingFooter>
-      ) : isAddCommunity ? (
-        <div className="flex justify-end pt-1">{submitButton}</div>
-      ) : (
-        <>
-          {submitButton}
-          {cancelButton}
-        </>
-      )}
-    </form>
-    <Dialog
-      onOpenChange={(open) => {
-        if (!open) setPickerOpen(false);
-      }}
-      open={pickerOpen}
-    >
-      <DialogContent
-        className="max-w-lg"
-        data-testid="dntls-identity-picker-dialog"
+      <form
+        className={cn(
+          "flex w-full flex-col",
+          isOnboardingSpotlight
+            ? "relative items-center"
+            : isAddCommunity
+              ? "gap-4"
+              : "gap-3",
+        )}
+        id={formId}
+        onSubmit={handleSubmit}
       >
-        <DialogTitle>Choose your DNTLS name</DialogTitle>
-        <DialogDescription>
-          Buzz will use this name when you join DNTLS communities.
-        </DialogDescription>
-        <DntlsIdentityPicker
-          onBound={() => {
-            setPickerOpen(false);
-            if (dntlsName) void connectNativeRelay(dntlsName);
-          }}
-          onCancel={() => setPickerOpen(false)}
-        />
-      </DialogContent>
-    </Dialog>
+        {isOnboardingSpotlight ? (
+          <Card
+            className="w-[min(calc(100%+12rem),calc(100vw-2rem))] max-w-[1120px] translate-y-8 px-8 py-6"
+            data-testid="invite-redeem-input-frame"
+            variant="textured"
+          >
+            <div
+              className={SPOTLIGHT_TEXTURE_CONTENT_CLASS}
+              style={SPOTLIGHT_OVERFLOW_FADE}
+            >
+              <label className="block w-full" htmlFor="invite-input">
+                <span className="sr-only">Invite link or code</span>
+                <span className={ONBOARDING_KEY_ROW_CLASS}>
+                  <input
+                    autoCapitalize="none"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    className={cn(
+                      ONBOARDING_KEY_TEXT_CLASS,
+                      "block border-0 bg-transparent p-0 text-center shadow-none outline-none placeholder:text-[var(--buzz-onboarding-backup-ink)] placeholder:opacity-40 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
+                    )}
+                    data-testid="invite-redeem-input"
+                    disabled={isRedeeming}
+                    id="invite-input"
+                    onChange={handleInviteInputChange}
+                    placeholder={
+                      placeholder ?? "https://relay.example.com/invite/abc123"
+                    }
+                    spellCheck={false}
+                    type="text"
+                    value={inviteInput}
+                  />
+                </span>
+              </label>
+            </div>
+          </Card>
+        ) : (
+          <div className="space-y-1.5 text-left">
+            <label
+              className="text-sm font-medium text-foreground"
+              htmlFor="invite-input"
+            >
+              {isAddCommunity
+                ? "Community URL, DNTLS name, or invite link"
+                : "Invite link or code"}
+            </label>
+            <Input
+              autoComplete="off"
+              autoCorrect="off"
+              autoFocus
+              className={
+                isAddCommunity
+                  ? "h-11 rounded-xl border-input bg-muted/40 px-3 shadow-none transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-visible:border-muted-foreground/50 focus-visible:ring-0"
+                  : "h-10 bg-background"
+              }
+              data-testid="invite-redeem-input"
+              disabled={isRedeeming}
+              id="invite-input"
+              onChange={handleInviteInputChange}
+              placeholder={
+                isAddCommunity
+                  ? "community.example.com, name.dntls, or an invite link"
+                  : "https://relay.example.com/invite/abc123 or paste a code"
+              }
+              spellCheck={false}
+              type="text"
+              value={inviteInput}
+            />
+          </div>
+        )}
+
+        {isOnboardingSpotlight ? (
+          <p
+            aria-hidden={!showInvalidInviteTip}
+            aria-live="polite"
+            className={cn(
+              "absolute top-[calc(100%+2rem)] mt-4 min-h-5 w-full max-w-4xl text-center text-sm text-[#717106] transition-opacity duration-150 ease-out",
+              showInvalidInviteTip ? "opacity-100" : "opacity-0",
+            )}
+            data-testid="invalid-invite-tip"
+          >
+            Please enter a valid invite link, community URL, or DNTLS name
+          </p>
+        ) : null}
+
+        {needsRelayField ? (
+          <div
+            className={cn(
+              "space-y-1.5 text-left",
+              isOnboardingSpotlight && "w-full max-w-[500px]",
+            )}
+          >
+            <label
+              className="text-sm font-medium text-foreground"
+              htmlFor="invite-relay-url"
+            >
+              Relay URL
+            </label>
+            <Input
+              className="h-10 bg-background"
+              disabled={isRedeeming}
+              id="invite-relay-url"
+              onChange={handleRelayInputChange}
+              placeholder="wss://relay.example.com"
+              type="text"
+              value={bareCodeRelayUrl}
+            />
+          </div>
+        ) : null}
+
+        {policyError ? (
+          <p className="text-center text-sm text-destructive">{policyError}</p>
+        ) : null}
+
+        {error ? (
+          <p className="text-center text-sm text-destructive">{error}</p>
+        ) : null}
+
+        <AnimatePresence initial={false}>
+          {joinPolicy && policyTarget ? (
+            <motion.div
+              animate={{
+                height: "auto",
+                marginTop: 0,
+                opacity: 1,
+                transform: "translateY(0rem)",
+              }}
+              className="overflow-hidden"
+              exit={
+                shouldReduceMotion
+                  ? { height: 0, marginTop: "-0.75rem", opacity: 0 }
+                  : {
+                      height: 0,
+                      marginTop: "-0.75rem",
+                      opacity: 0,
+                      transform: "translateY(-0.25rem)",
+                    }
+              }
+              initial={
+                shouldReduceMotion
+                  ? false
+                  : {
+                      height: 0,
+                      marginTop: "-0.75rem",
+                      opacity: 0,
+                      transform: "translateY(-0.25rem)",
+                    }
+              }
+              key={`${policyTarget.relayWsUrl}:${joinPolicy.version}`}
+              transition={
+                shouldReduceMotion
+                  ? { duration: 0 }
+                  : { duration: 0.22, ease: POLICY_REVEAL_EASE }
+              }
+            >
+              <JoinPolicyNotice
+                ageConfirmed={ageConfirmed}
+                agreementConfirmed={agreementConfirmed}
+                onAgeConfirmedChange={(confirmed) => {
+                  setAgeConfirmed(confirmed);
+                  setPolicyError(null);
+                }}
+                onAgreementConfirmedChange={(confirmed) => {
+                  setAgreementConfirmed(confirmed);
+                  setPolicyError(null);
+                }}
+                policy={joinPolicy}
+                relayWsUrl={policyTarget.relayWsUrl}
+              />
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
+
+        {isOnboardingSpotlight ? (
+          <OnboardingFooter>{submitButton}</OnboardingFooter>
+        ) : isAddCommunity ? (
+          <div className="flex justify-end pt-1">{submitButton}</div>
+        ) : (
+          <>
+            {submitButton}
+            {cancelButton}
+          </>
+        )}
+      </form>
+      <Dialog
+        onOpenChange={(open) => {
+          if (!open) setPickerOpen(false);
+        }}
+        open={pickerOpen}
+      >
+        <DialogContent
+          className="max-w-lg"
+          data-testid="dntls-identity-picker-dialog"
+        >
+          <DialogTitle>Choose your DNTLS name</DialogTitle>
+          <DialogDescription>
+            Buzz will use this name when you join DNTLS communities.
+          </DialogDescription>
+          <DntlsIdentityPicker
+            onBound={() => {
+              setPickerOpen(false);
+              if (dntlsName) void connectNativeRelay(dntlsName);
+            }}
+            onCancel={() => setPickerOpen(false)}
+          />
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

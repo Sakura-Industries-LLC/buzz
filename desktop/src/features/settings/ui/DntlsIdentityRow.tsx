@@ -106,9 +106,7 @@ export function DntlsIdentityRow() {
           Buzz.
         </p>
       ) : null}
-      {error ? (
-        <p className="mt-2 text-sm text-destructive">{error}</p>
-      ) : null}
+      {error ? <p className="mt-2 text-sm text-destructive">{error}</p> : null}
       <Dialog
         onOpenChange={(open) => {
           if (!open) setPickerOpen(false);
