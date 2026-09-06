@@ -187,7 +187,6 @@ export function DntlsIdentityPicker({
           bound,
           selectedFqdn: selected.fqdn,
         });
-        onBound(bound.name);
       } catch (error) {
         if (cancelledRef.current) return;
         const code = errorCode(error);
@@ -216,7 +215,7 @@ export function DntlsIdentityPicker({
         setPhase({ kind: "list", identities, selectedName });
       }
     },
-    [onBound],
+    [],
   );
 
   const skipButton =
@@ -410,15 +409,24 @@ export function DntlsIdentityPicker({
 
       {phase.kind === "bound" ? (
         <div
-          className="flex flex-col gap-1 text-sm leading-6 text-foreground"
+          className="flex flex-col gap-3 text-sm leading-6 text-foreground"
           data-testid="dntls-identity-picker-bound"
         >
-          <p>Buzz is bound as {phase.bound.name}</p>
-          {phase.bound.scope === "subname" ? (
-            <p className="text-muted-foreground">
-              a Buzz-only subname of {phase.selectedFqdn}
-            </p>
-          ) : null}
+          <div className="flex flex-col gap-1">
+            <p>Buzz is bound as {phase.bound.name}</p>
+            {phase.bound.scope === "subname" ? (
+              <p className="text-muted-foreground">
+                a Buzz-only subname of {phase.selectedFqdn}
+              </p>
+            ) : null}
+          </div>
+          <Button
+            className="w-fit rounded-full"
+            data-testid="dntls-identity-picker-continue"
+            onClick={() => onBound(phase.bound.name)}
+          >
+            Continue
+          </Button>
         </div>
       ) : null}
 

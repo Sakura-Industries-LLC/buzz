@@ -119,6 +119,10 @@ test("prompts for a DNTLS name before the first DNTLS community", async ({
     .getByTestId("dntls-identity-picker-name-demo-alice.dntls")
     .click();
   await picker.getByTestId("dntls-identity-picker-use-name").click();
+  await expect(picker.getByTestId("dntls-identity-picker-bound")).toContainText(
+    "Buzz is bound as buzz.demo-alice.dntls",
+  );
+  await picker.getByTestId("dntls-identity-picker-continue").click();
 
   await expect
     .poll(() =>
