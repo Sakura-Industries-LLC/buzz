@@ -6,6 +6,7 @@ mod builderlab;
 mod channel_head_cache;
 mod commands;
 mod deep_link;
+mod dntls_attest;
 mod dntls_connector;
 mod dntls_credentials;
 mod egress_guard;
@@ -546,7 +547,9 @@ pub fn run() {
             acknowledge_pending_entity_deep_link,
             dntls_connector::start_dntls_connector,
             dntls_credentials::dntls_credentials_status,
-            dntls_credentials::import_dntls_credentials,
+            dntls_credentials::dntls_resolver_status,
+            dntls_credentials::list_dntls_identities,
+            dntls_credentials::bind_dntls_identity,
             dntls_credentials::remove_dntls_credentials,
             start_builderlab_login,
             cancel_builderlab_login,

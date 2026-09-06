@@ -49,8 +49,10 @@ pub(crate) struct DntlsConnectors {
     running: Arc<Mutex<HashMap<String, RunningConnector>>>,
 }
 
-impl Drop for DntlsConnectors {
-    fn drop(&mut self) {
+impl DntlsConnectors {
+    /// Aborts every running connector so the next community start presents
+    /// the credentials stored at that time.
+    pub(crate) fn reset(&self) {
         let Ok(mut running) = self.running.lock() else {
             return;
         };
@@ -58,6 +60,12 @@ impl Drop for DntlsConnectors {
             connector.task.abort();
         }
         running.clear();
+    }
+}
+
+impl Drop for DntlsConnectors {
+    fn drop(&mut self) {
+        self.reset();
     }
 }
 
