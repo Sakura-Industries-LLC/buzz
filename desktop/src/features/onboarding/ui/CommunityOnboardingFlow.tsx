@@ -21,6 +21,7 @@ import {
   parseEmojiAvatarDataUrl,
   ProfileAvatarEditor,
 } from "@/features/profile/ui/ProfileAvatarEditor";
+import { dntlsCredentialsStatus } from "@/features/communities/dntlsConnector";
 import { getProfile, updateProfile } from "@/shared/api/tauriProfiles";
 import { getIdentity, importIdentity } from "@/shared/api/tauriIdentity";
 import { listPersonas } from "@/shared/api/tauriPersonas";
@@ -305,22 +306,48 @@ export function CommunityOnboardingFlow({
   }, [isPending, update]);
 
   const isProfileStage = transaction?.stage === "profile";
+  // Skip the display-name step when the relay already has a profile, or when
+  // this is a DNTLS community: the verified DNTLS name the user chose is
+  // their name, so it is published as the display name without asking.
   React.useEffect(() => {
     if (!isProfileStage || !transaction) return;
     if (checkedProfileTransactionRef.current === transaction.id) return;
 
     checkedProfileTransactionRef.current = transaction.id;
-    void getProfile()
-      .then((profile) => {
-        if (profile.hasProfileEvent) {
-          setTransitionDirection("forward");
-          update({ stage: "team-intro", error: undefined }, transaction.id);
+    const skipToTeam = () => {
+      setTransitionDirection("forward");
+      update({ stage: "team-intro", error: undefined }, transaction.id);
+    };
+    void (async () => {
+      const profile = await getProfile().catch(() => null);
+      if (profile?.hasProfileEvent) {
+        skipToTeam();
+        return;
+      }
+      if (!transaction.dntlsName) return;
+      const status = await dntlsCredentialsStatus().catch(() => null);
+      const userName = status?.user_name;
+      if (!userName) return;
+      try {
+        await updateProfile({ displayName: userName });
+      } catch (error) {
+        if (isRelayMembershipDeniedError(error)) {
+          try {
+            const identity = await getIdentity();
+            setDeniedPubkey(identity.pubkey);
+          } catch {
+            setDeniedPubkey("");
+          }
+          setIsMembershipDenied(true);
+          return;
         }
-      })
-      .catch(() => {
-        // Discovery is best-effort. Staying on the profile step preserves the
-        // existing path when the relay cannot answer the lookup.
-      });
+        // Publishing failed for another reason: fall through to the manual
+        // step, seeded with the name so the user only has to confirm.
+        setDisplayName((prev) => (prev === "" ? userName : prev));
+        return;
+      }
+      skipToTeam();
+    })();
   }, [isProfileStage, transaction, update]);
   const isTeamStage =
     transaction?.stage === "team-intro" ||

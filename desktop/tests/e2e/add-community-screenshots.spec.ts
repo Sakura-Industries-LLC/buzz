@@ -68,6 +68,11 @@ test("capture: join an existing community", async ({ page }) => {
 });
 
 test("joins by exact DNTLS community name", async ({ page }) => {
+  await page.evaluate(() => {
+    const config = window.__BUZZ_E2E__;
+    if (!config) throw new Error("missing e2e config");
+    config.mock = { ...config.mock, profileHasEvent: false };
+  });
   await page.getByTestId("add-community-join").click();
   const communityName = page.getByLabel(
     "Community URL, DNTLS name, or invite link",
@@ -96,6 +101,20 @@ test("joins by exact DNTLS community name", async ({ page }) => {
       page.evaluate(() => window.localStorage.getItem("buzz-communities")),
     )
     .toContain('"dntlsName":"community.example.dntls"');
+  // A DNTLS community never asks for a display name: the chosen DNTLS name
+  // is published as the profile and the profile step is skipped.
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.__BUZZ_E2E_COMMAND_PAYLOADS__?.some(
+          (entry) =>
+            entry.command === "update_profile" &&
+            entry.payload?.displayName === "demo-alice.dntls",
+        ),
+      ),
+    )
+    .toBe(true);
+  await expect(page.getByTestId("community-profile-name-key")).toHaveCount(0);
 });
 
 test("prompts for a DNTLS name before the first DNTLS community", async ({

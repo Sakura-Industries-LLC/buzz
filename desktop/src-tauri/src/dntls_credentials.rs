@@ -23,6 +23,8 @@ use crate::dntls_attest;
 use crate::dntls_connector::DntlsConnectors;
 
 const CREDENTIALS_FILE: &str = "credentials.bundle";
+/// Records how the stored bundle was obtained (see [`Binding`]).
+const BINDING_FILE: &str = "binding.json";
 const DATA_DIR_NAME: &str = "data";
 /// Subname label proposed to the resolver; the user may edit it on the prompt.
 const SUBNAME_LABEL: &str = "buzz";
@@ -34,6 +36,19 @@ const PROMPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 pub(crate) struct DntlsCredentialsStatus {
     /// Verified FQDN from the stored credentials file, if one is present.
     pub name: Option<String>,
+    /// The name the user chose: `name` without Buzz's own label when the
+    /// resolver gave Buzz a subname, otherwise `name` itself.
+    pub user_name: Option<String>,
+}
+
+/// Sidecar written next to the bundle by `bind_dntls_identity`.
+///
+/// A bundle without one (imported before the resolver flow existed) is
+/// treated as the name's own key.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct Binding {
+    /// `root` or `subname`, whichever key the user gave.
+    scope: String,
 }
 
 /// Whether the Local Trust Resolver can serve Buzz right now.
@@ -133,6 +148,19 @@ pub(crate) fn credentials_bundle_path(app: &AppHandle) -> Result<PathBuf, String
     Ok(dntls_dir(app)?.join(CREDENTIALS_FILE))
 }
 
+/// Path of the binding sidecar next to the bundle.
+fn binding_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(dntls_dir(app)?.join(BINDING_FILE))
+}
+
+/// Reads the binding sidecar; missing or unreadable means the name's own key.
+fn read_binding(path: &Path) -> Binding {
+    std::fs::read(path)
+        .ok()
+        .and_then(|data| serde_json::from_slice(&data).ok())
+        .unwrap_or_default()
+}
+
 /// Connector data directory used for resolver pins.
 pub(crate) fn credentials_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = dntls_dir(app)?.join(DATA_DIR_NAME);
@@ -145,10 +173,22 @@ pub(crate) fn credentials_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
 pub(crate) fn dntls_credentials_status(app: AppHandle) -> Result<DntlsCredentialsStatus, String> {
     let path = credentials_bundle_path(&app)?;
     if !path.is_file() {
-        return Ok(DntlsCredentialsStatus { name: None });
+        return Ok(DntlsCredentialsStatus {
+            name: None,
+            user_name: None,
+        });
     }
     let name = credentials_name_from_path(&path)?;
-    Ok(DntlsCredentialsStatus { name: Some(name) })
+    let binding = read_binding(&binding_path(&app)?);
+    let user_name = if binding.scope == "subname" {
+        name.split_once('.').map(|(_, rest)| rest.to_string())
+    } else {
+        None
+    };
+    Ok(DntlsCredentialsStatus {
+        user_name: Some(user_name.unwrap_or_else(|| name.clone())),
+        name: Some(name),
+    })
 }
 
 /// Probes the resolver's public trust-root route: no consent, no attestation.
@@ -228,11 +268,14 @@ pub(crate) async fn bind_dntls_identity(
     }
     let dest = credentials_bundle_path(&app)?;
     write_restricted(&dest, &export.bundle)?;
-    connectors.reset();
-    Ok(DntlsBound {
-        name: fqdn,
-        scope: export.scope.to_string(),
+    let scope = export.scope.to_string();
+    let binding = serde_json::to_vec(&Binding {
+        scope: scope.clone(),
     })
+    .map_err(|error| format!("encode DNTLS binding: {error}"))?;
+    write_restricted(&binding_path(&app)?, &binding)?;
+    connectors.reset();
+    Ok(DntlsBound { name: fqdn, scope })
 }
 
 /// Deletes the stored credentials file and drops running connectors.
@@ -242,11 +285,12 @@ pub(crate) fn remove_dntls_credentials(
     app: AppHandle,
     connectors: State<'_, DntlsConnectors>,
 ) -> Result<(), String> {
-    let path = credentials_bundle_path(&app)?;
-    match std::fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("could not remove DNTLS credentials: {error}")),
+    for path in [credentials_bundle_path(&app)?, binding_path(&app)?] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("could not remove DNTLS credentials: {error}")),
+        }
     }
     connectors.reset();
     Ok(())
@@ -295,7 +339,7 @@ fn write_restricted(path: &Path, data: &[u8]) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("create credentials dir: {error}"))?;
     }
-    let tmp = path.with_extension("bundle.tmp");
+    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
     {
         let mut options = OpenOptions::new();
         options.write(true).create(true).truncate(true);
