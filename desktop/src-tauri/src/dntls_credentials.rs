@@ -26,6 +26,8 @@ const CREDENTIALS_FILE: &str = "credentials.bundle";
 /// Records how the stored bundle was obtained (see [`Binding`]).
 const BINDING_FILE: &str = "binding.json";
 const DATA_DIR_NAME: &str = "data";
+/// Resolver-endpoint pin store the SDK keeps under the data directory.
+const PINS_FILE: &str = "pins.json";
 /// Subname label proposed to the resolver; the user may edit it on the prompt.
 const SUBNAME_LABEL: &str = "buzz";
 /// Longest wait for the user to answer a resolver prompt.
@@ -274,6 +276,13 @@ pub(crate) async fn bind_dntls_identity(
     })
     .map_err(|error| format!("encode DNTLS binding: {error}"))?;
     write_restricted(&binding_path(&app)?, &binding)?;
+    // Endpoint pins were learned under the previous bundle's trust root; the
+    // new bundle's root is the authority now, so the pins are re-learned.
+    match std::fs::remove_file(credentials_data_dir(&app)?.join(PINS_FILE)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("could not reset DNTLS endpoint pins: {error}").into()),
+    }
     connectors.reset();
     Ok(DntlsBound { name: fqdn, scope })
 }
