@@ -223,6 +223,18 @@ type E2eConfig = {
      * already present; set `null` to exercise the first-run resolver path.
      */
     dntlsCredentialsName?: string | null;
+    /**
+     * Whether a resolver registration bearer is stored. Omit for a
+     * registered install; set `false` to exercise the confirmation-code path.
+     */
+    dntlsRegistered?: boolean;
+    /**
+     * Confirmation code emitted on `list_dntls_identities` /
+     * `bind_dntls_identity` as `dntls-registration-code`.
+     */
+    dntlsRegistrationCode?: string;
+    /** Structured error thrown by `list_dntls_identities`. */
+    dntlsListError?: { code: string; message: string };
     /** Delay Builderlab login completion so cancellation/retry UI can be tested. */
     builderlabLoginDelayMs?: number;
     /** Bound Builderlab Nostr identity. Null/omitted = not linked yet. */
@@ -11564,10 +11576,22 @@ export function maybeInstallE2eTauriMocks() {
       case "dntls_resolver_status":
         return {
           state: "ready",
-          attested: true,
+          registered: activeConfig?.mock?.dntlsRegistered ?? true,
           socket: "/tmp/dntls-resolver.sock",
         };
-      case "list_dntls_identities":
+      case "list_dntls_identities": {
+        const registrationCode = activeConfig?.mock?.dntlsRegistrationCode;
+        if (registrationCode) {
+          await emit("dntls-registration-code", { code: registrationCode });
+        }
+        const listError = activeConfig?.mock?.dntlsListError;
+        if (listError) {
+          await emit("dntls-registration-finished", {});
+          throw listError;
+        }
+        if (registrationCode) {
+          await emit("dntls-registration-finished", {});
+        }
         return [
           {
             name: "demo-alice.dntls",
@@ -11582,30 +11606,41 @@ export function maybeInstallE2eTauriMocks() {
             active: false,
           },
         ];
+      }
       case "bind_dntls_identity": {
-        if (
-          !payload ||
-          typeof payload !== "object" ||
-          !("name" in payload) ||
-          typeof payload.name !== "string"
-        ) {
-          throw {
-            code: "invalid_request",
-            message: "Missing DNTLS name.",
-          };
+        const registrationCode = activeConfig?.mock?.dntlsRegistrationCode;
+        if (registrationCode) {
+          await emit("dntls-registration-code", { code: registrationCode });
         }
-        const selected = payload.name;
-        const fqdn = selected.endsWith(".dntls")
-          ? selected
-          : `${selected}.dntls`;
-        const name = `buzz.${fqdn}`;
-        if (activeConfig) {
-          activeConfig.mock = {
-            ...activeConfig.mock,
-            dntlsCredentialsName: name,
-          };
+        try {
+          if (
+            !payload ||
+            typeof payload !== "object" ||
+            !("name" in payload) ||
+            typeof payload.name !== "string"
+          ) {
+            throw {
+              code: "invalid_request",
+              message: "Missing DNTLS name.",
+            };
+          }
+          const selected = payload.name;
+          const fqdn = selected.endsWith(".dntls")
+            ? selected
+            : `${selected}.dntls`;
+          const name = `buzz.${fqdn}`;
+          if (activeConfig) {
+            activeConfig.mock = {
+              ...activeConfig.mock,
+              dntlsCredentialsName: name,
+            };
+          }
+          return { name, scope: "subname" };
+        } finally {
+          if (registrationCode) {
+            await emit("dntls-registration-finished", {});
+          }
         }
-        return { name, scope: "subname" };
       }
       case "remove_dntls_credentials": {
         if (activeConfig) {

@@ -26,21 +26,6 @@ fn main() {
         println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_AGENT_ACCESS_OWNER_ONLY=1");
     }
 
-    // DNTLS program attestation marker embedded in the executable so the
-    // Local Trust Resolver can identify Buzz (see src/dntls_attest.rs).
-    // `BUZZ_DNTLS_ATTEST` overrides for development signing identities;
-    // otherwise the committed release marker is used.
-    println!("cargo:rerun-if-env-changed=BUZZ_DNTLS_ATTEST");
-    println!("cargo:rerun-if-changed=dntls-attest.marker");
-    let marker = match std::env::var("BUZZ_DNTLS_ATTEST") {
-        Ok(marker) => marker,
-        Err(_) => std::fs::read_to_string("dntls-attest.marker").unwrap_or_default(),
-    };
-    println!(
-        "cargo:rustc-env=BUZZ_DESKTOP_BUILD_DNTLS_ATTEST={}",
-        marker.trim()
-    );
-
     if let Ok(relay_url) = std::env::var("BUZZ_RELAY_URL") {
         println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_RELAY_URL={relay_url}");
     }

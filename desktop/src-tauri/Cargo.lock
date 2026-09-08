@@ -2711,7 +2711,7 @@ dependencies = [
 [[package]]
 name = "dntls-testnet-sdk"
 version = "0.0.0"
-source = "git+https://github.com/Sakura-Industries-LLC/dntls-testnet?rev=396a977da7077cf205bc563a0adf42fc9df0bebc#396a977da7077cf205bc563a0adf42fc9df0bebc"
+source = "git+https://github.com/Sakura-Industries-LLC/dntls-testnet?rev=9ee2b1fc39e72127fd54dd523f96bf6ff0f7f982#9ee2b1fc39e72127fd54dd523f96bf6ff0f7f982"
 dependencies = [
  "base64 0.22.1",
  "bech32 0.12.0",
