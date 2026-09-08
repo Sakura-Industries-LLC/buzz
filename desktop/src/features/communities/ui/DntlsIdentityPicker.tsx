@@ -1,4 +1,5 @@
 import * as React from "react";
+import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import {
@@ -18,15 +19,16 @@ const UNAVAILABLE_COPY =
   "Install and open the DNTLS Local Trust Resolver, then try again";
 const NO_IDENTITY_COPY =
   "Open the Local Trust Resolver and sign in to your DNTLS names first";
-const UNRECOGNIZED_BUILD_COPY =
-  "This build of Buzz cannot be recognized by the Local Trust Resolver";
-const UNRECOGNIZED_COPY =
-  "The Local Trust Resolver did not recognize this copy of Buzz";
+const CONNECT_HEADING = "Connect to the Local Trust Resolver";
+const REGISTRATION_CODE_COPY =
+  "Approve only if the resolver prompt shows this code";
 const LIST_CONSENT_COPY = "The Local Trust Resolver will ask you to allow this";
 const BIND_CONSENT_COPY =
   "The Local Trust Resolver will ask which key to give Buzz";
 const DENIED_COPY = "You didn't allow it";
 const EMPTY_COPY = "No names are stored on this machine yet";
+const REGISTRATION_CODE_EVENT = "dntls-registration-code";
+const REGISTRATION_FINISHED_EVENT = "dntls-registration-finished";
 
 type PickerProps = {
   onBound: (name: string) => void;
@@ -38,7 +40,7 @@ type PickerPhase =
   | { kind: "probing" }
   | { kind: "unavailable" }
   | { kind: "no_identity" }
-  | { kind: "unrecognized"; message: string }
+  | { kind: "connect" }
   | { kind: "ready" }
   | { kind: "listing" }
   | { kind: "empty" }
@@ -68,6 +70,13 @@ function canUseIdentity(identity: DntlsIdentity): boolean {
   return identity.has_private_identity;
 }
 
+function isRegistrationFailure(
+  code: string | null,
+  sawRegistration: boolean,
+): boolean {
+  return code === "unregistered" || (code === "denied" && sawRegistration);
+}
+
 export function DntlsIdentityPicker({
   onBound,
   onCancel,
@@ -75,7 +84,11 @@ export function DntlsIdentityPicker({
 }: PickerProps) {
   const [phase, setPhase] = React.useState<PickerPhase>({ kind: "probing" });
   const [notice, setNotice] = React.useState<string | null>(null);
+  const [registrationCode, setRegistrationCode] = React.useState<string | null>(
+    null,
+  );
   const cancelledRef = React.useRef(false);
+  const sawRegistrationRef = React.useRef(false);
 
   React.useEffect(() => {
     cancelledRef.current = false;
@@ -84,46 +97,28 @@ export function DntlsIdentityPicker({
     };
   }, []);
 
-  const probeResolver = React.useCallback(async () => {
-    setNotice(null);
-    setPhase({ kind: "probing" });
-    try {
-      const status = await getDntlsResolverStatus();
-      if (cancelledRef.current) return;
-      if (status.state === "unavailable") {
-        setPhase({ kind: "unavailable" });
-        return;
-      }
-      if (status.state === "no_identity") {
-        setPhase({ kind: "no_identity" });
-        return;
-      }
-      if (!status.attested) {
-        setPhase({ kind: "unrecognized", message: UNRECOGNIZED_BUILD_COPY });
-        return;
-      }
-      setPhase({ kind: "ready" });
-    } catch (error) {
-      if (cancelledRef.current) return;
-      const code = errorCode(error);
-      if (code === "not_attested") {
-        setPhase({ kind: "unrecognized", message: UNRECOGNIZED_BUILD_COPY });
-        return;
-      }
-      if (code === "no_identity") {
-        setPhase({ kind: "no_identity" });
-        return;
-      }
-      setPhase({ kind: "unavailable" });
-    }
-  }, []);
-
   React.useEffect(() => {
-    void probeResolver();
-  }, [probeResolver]);
+    const unlisteners: Array<() => void> = [];
+    let disposed = false;
+    listen<{ code: string }>(REGISTRATION_CODE_EVENT, ({ payload }) => {
+      if (disposed || typeof payload?.code !== "string" || !payload.code) {
+        return;
+      }
+      sawRegistrationRef.current = true;
+      setRegistrationCode(payload.code);
+    }).then((unlisten) => (disposed ? unlisten() : unlisteners.push(unlisten)));
+    listen(REGISTRATION_FINISHED_EVENT, () => {
+      if (!disposed) setRegistrationCode(null);
+    }).then((unlisten) => (disposed ? unlisten() : unlisteners.push(unlisten)));
+    return () => {
+      disposed = true;
+      for (const unlisten of unlisteners) unlisten();
+    };
+  }, []);
 
   const showNames = React.useCallback(async () => {
     setNotice(null);
+    sawRegistrationRef.current = false;
     setPhase({ kind: "listing" });
     try {
       const identities = await listDntlsIdentities();
@@ -144,17 +139,13 @@ export function DntlsIdentityPicker({
     } catch (error) {
       if (cancelledRef.current) return;
       const code = errorCode(error);
+      if (isRegistrationFailure(code, sawRegistrationRef.current)) {
+        setPhase({ kind: "connect" });
+        return;
+      }
       if (code === "denied") {
         setNotice(DENIED_COPY);
         setPhase({ kind: "ready" });
-        return;
-      }
-      if (code === "unverified") {
-        setPhase({ kind: "unrecognized", message: UNRECOGNIZED_COPY });
-        return;
-      }
-      if (code === "not_attested") {
-        setPhase({ kind: "unrecognized", message: UNRECOGNIZED_BUILD_COPY });
         return;
       }
       if (code === "no_identity") {
@@ -170,6 +161,44 @@ export function DntlsIdentityPicker({
     }
   }, []);
 
+  const probeResolver = React.useCallback(async () => {
+    setNotice(null);
+    setPhase({ kind: "probing" });
+    try {
+      const status = await getDntlsResolverStatus();
+      if (cancelledRef.current) return;
+      if (status.state === "unavailable") {
+        setPhase({ kind: "unavailable" });
+        return;
+      }
+      if (status.state === "no_identity") {
+        setPhase({ kind: "no_identity" });
+        return;
+      }
+      if (!status.registered) {
+        void showNames();
+        return;
+      }
+      setPhase({ kind: "ready" });
+    } catch (error) {
+      if (cancelledRef.current) return;
+      const code = errorCode(error);
+      if (isRegistrationFailure(code, sawRegistrationRef.current)) {
+        setPhase({ kind: "connect" });
+        return;
+      }
+      if (code === "no_identity") {
+        setPhase({ kind: "no_identity" });
+        return;
+      }
+      setPhase({ kind: "unavailable" });
+    }
+  }, [showNames]);
+
+  React.useEffect(() => {
+    void probeResolver();
+  }, [probeResolver]);
+
   const bindSelectedName = React.useCallback(
     async (identities: DntlsIdentity[], selectedName: string) => {
       const selected = identities.find(
@@ -177,6 +206,7 @@ export function DntlsIdentityPicker({
       );
       if (!selected || !canUseIdentity(selected)) return;
       setNotice(null);
+      sawRegistrationRef.current = false;
       setPhase({ kind: "binding", identities, selectedName });
       try {
         const bound = await bindDntlsIdentity(selected.name);
@@ -189,17 +219,13 @@ export function DntlsIdentityPicker({
       } catch (error) {
         if (cancelledRef.current) return;
         const code = errorCode(error);
+        if (isRegistrationFailure(code, sawRegistrationRef.current)) {
+          setPhase({ kind: "connect" });
+          return;
+        }
         if (code === "denied") {
           setNotice(DENIED_COPY);
           setPhase({ kind: "list", identities, selectedName });
-          return;
-        }
-        if (code === "unverified") {
-          setPhase({ kind: "unrecognized", message: UNRECOGNIZED_COPY });
-          return;
-        }
-        if (code === "not_attested") {
-          setPhase({ kind: "unrecognized", message: UNRECOGNIZED_BUILD_COPY });
           return;
         }
         if (code === "resolver_unavailable") {
@@ -247,13 +273,33 @@ export function DntlsIdentityPicker({
       className="flex w-full flex-col gap-4"
       data-testid="dntls-identity-picker"
     >
-      {phase.kind === "probing" ? (
+      {phase.kind === "probing" && registrationCode == null ? (
         <div className="flex justify-center py-6">
           <Spinner aria-label="Checking the Local Trust Resolver" />
         </div>
       ) : null}
 
-      {phase.kind === "unavailable" ? (
+      {registrationCode != null ? (
+        <div
+          className="flex flex-col items-start gap-3"
+          data-testid="dntls-identity-picker-registration"
+        >
+          <p className="text-sm font-medium leading-6 text-foreground">
+            {CONNECT_HEADING}
+          </p>
+          <p
+            className="font-mono text-3xl font-semibold tracking-[0.35em] text-foreground"
+            data-testid="dntls-identity-picker-registration-code"
+          >
+            {registrationCode}
+          </p>
+          <p className="text-sm leading-6 text-muted-foreground">
+            {REGISTRATION_CODE_COPY}
+          </p>
+        </div>
+      ) : null}
+
+      {registrationCode == null && phase.kind === "unavailable" ? (
         <StatusBlock
           message={UNAVAILABLE_COPY}
           onRetry={() => void probeResolver()}
@@ -270,18 +316,22 @@ export function DntlsIdentityPicker({
         </StatusBlock>
       ) : null}
 
-      {phase.kind === "no_identity" ? (
+      {registrationCode == null && phase.kind === "no_identity" ? (
         <StatusBlock
           message={NO_IDENTITY_COPY}
           onRetry={() => void probeResolver()}
         />
       ) : null}
 
-      {phase.kind === "unrecognized" ? (
-        <p className="text-sm leading-6 text-foreground">{phase.message}</p>
+      {registrationCode == null && phase.kind === "connect" ? (
+        <StatusBlock
+          message={CONNECT_HEADING}
+          onRetry={() => void showNames()}
+        />
       ) : null}
 
-      {phase.kind === "ready" || phase.kind === "listing" ? (
+      {registrationCode == null &&
+      (phase.kind === "ready" || phase.kind === "listing") ? (
         <div className="flex flex-col items-start gap-3">
           {notice ? (
             <p className="text-sm leading-6 text-foreground">{notice}</p>
@@ -309,7 +359,7 @@ export function DntlsIdentityPicker({
         </div>
       ) : null}
 
-      {phase.kind === "empty" ? (
+      {registrationCode == null && phase.kind === "empty" ? (
         <div className="flex flex-col items-start gap-3">
           <p className="text-sm leading-6 text-foreground">{EMPTY_COPY}</p>
           <p className="text-sm leading-6 text-muted-foreground">
@@ -327,7 +377,8 @@ export function DntlsIdentityPicker({
         </div>
       ) : null}
 
-      {phase.kind === "list" || phase.kind === "binding" ? (
+      {registrationCode == null &&
+      (phase.kind === "list" || phase.kind === "binding") ? (
         <div className="flex flex-col gap-3">
           {notice ? (
             <p className="text-sm leading-6 text-foreground">{notice}</p>

@@ -6,7 +6,6 @@ mod builderlab;
 mod channel_head_cache;
 mod commands;
 mod deep_link;
-mod dntls_attest;
 mod dntls_connector;
 mod dntls_credentials;
 mod egress_guard;
@@ -229,6 +228,7 @@ pub fn run() {
         .manage(PendingNavigationDeepLinks::default())
         .manage(PendingEntityDeepLinks::default())
         .manage(dntls_connector::DntlsConnectors::default())
+        .manage(dntls_credentials::DntlsResolver::default())
         .manage(BuilderlabSession::default())
         .manage(BuilderlabLogin::default())
         .manage(commands::pairing::PairingHandle::new())

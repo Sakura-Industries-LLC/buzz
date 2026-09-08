@@ -17,7 +17,7 @@ export type DntlsCredentialsStatus = {
 
 export type DntlsResolverStatus = {
   state: "ready" | "no_identity" | "unavailable";
-  attested: boolean;
+  registered: boolean;
   socket: string;
 };
 
