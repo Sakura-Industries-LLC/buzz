@@ -18,10 +18,10 @@ use crate::{CommunityId, Db};
 pub enum UpsertJoinOutcome {
     /// Inserted or replaced this pubkey's own pending row.
     Pending,
-    /// Bound this pubkey to the name as approved (insert, promote, or no-op).
+    /// Approved binding inserted, promoted, reassigned, or unchanged.
     Bound,
-    /// A different pubkey already holds a pending or approved application for
-    /// the same fqdn in this community.
+    /// Approval mode found the name held by another key, or this key already
+    /// has an approved mapping for another name in the community.
     NameAlreadyClaimed,
 }
 
@@ -34,7 +34,7 @@ pub struct DntlsApplication {
     pub fqdn: String,
     /// `pending` or `approved`.
     pub status: String,
-    /// When the application was first created (or last replaced while pending).
+    /// When created, replaced while pending, or rebound to a different pubkey.
     pub created_at: DateTime<Utc>,
     /// When an owner/admin approved the application, if approved.
     pub approved_at: Option<DateTime<Utc>>,
@@ -158,12 +158,16 @@ pub async fn upsert_pending_application(
     Ok(UpsertJoinOutcome::Pending)
 }
 
-/// Bind this pubkey to `fqdn` as an approved mapping.
+/// Bind a currently verified name to this pubkey in auto-admission mode.
 ///
-/// First-bound-wins: if a *different* pubkey already holds the name, returns
-/// [`UpsertJoinOutcome::NameAlreadyClaimed`]. Repeating the same pubkey and
-/// name is a no-op. An already-approved row for this pubkey under a different
-/// name is refused so the original mapping stays put.
+/// The caller must have proved `fqdn` and possession of `pubkey`. The name's
+/// previous pending or approved mapping is replaced atomically, including
+/// under concurrent claims. Ordinary membership and roles are not transferred
+/// or revoked. Repeating the same approved mapping is a no-op.
+///
+/// A pending application by this pubkey for another name is replaced. An
+/// approved mapping for another name is preserved: the transaction rolls back
+/// and returns [`UpsertJoinOutcome::NameAlreadyClaimed`].
 pub async fn upsert_approved_application(
     pool: &PgPool,
     community: CommunityId,
@@ -173,90 +177,47 @@ pub async fn upsert_approved_application(
 ) -> Result<UpsertJoinOutcome> {
     let mut tx = pool.begin().await?;
 
-    let existing_fqdn: Option<String> = sqlx::query_scalar(
-        "SELECT pubkey FROM dntls_applications \
-         WHERE community_id = $1 AND fqdn = $2 AND pubkey <> $3 \
-         FOR UPDATE",
+    sqlx::query(
+        "DELETE FROM dntls_applications \
+         WHERE community_id = $1 AND pubkey = $2 AND fqdn <> $3 AND status = 'pending'",
     )
     .bind(community.as_uuid())
+    .bind(pubkey)
     .bind(fqdn)
-    .bind(pubkey)
-    .fetch_optional(&mut *tx)
+    .execute(&mut *tx)
     .await?;
-    if existing_fqdn.is_some() {
-        tx.commit().await?;
-        return Ok(UpsertJoinOutcome::NameAlreadyClaimed);
-    }
 
-    let existing_self: Option<(String, String)> = sqlx::query_as(
-        "SELECT status, fqdn FROM dntls_applications \
-         WHERE community_id = $1 AND pubkey = $2 \
-         FOR UPDATE",
+    // The unique name key serializes competing bindings, including when no
+    // row exists yet. The pubkey key still forbids taking a second approved name.
+    let binding = sqlx::query(
+        "INSERT INTO dntls_applications \
+         (community_id, pubkey, fqdn, status, approved_at, approved_by) \
+         VALUES ($1, $2, $3, 'approved', now(), $4) \
+         ON CONFLICT (community_id, fqdn) DO UPDATE \
+         SET pubkey = EXCLUDED.pubkey, status = 'approved', \
+             created_at = CASE WHEN dntls_applications.pubkey = EXCLUDED.pubkey \
+                 THEN dntls_applications.created_at ELSE EXCLUDED.created_at END, \
+             approved_at = EXCLUDED.approved_at, approved_by = EXCLUDED.approved_by \
+         WHERE dntls_applications.pubkey <> EXCLUDED.pubkey \
+             OR dntls_applications.status = 'pending'",
     )
     .bind(community.as_uuid())
     .bind(pubkey)
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    match existing_self
-        .as_ref()
-        .map(|(status, current_fqdn)| (status.as_str(), current_fqdn.as_str()))
-    {
-        Some(("approved", current_fqdn)) if current_fqdn == fqdn => {
+    .bind(fqdn)
+    .bind(approved_by)
+    .execute(&mut *tx)
+    .await;
+    match binding {
+        Ok(_) => {
             tx.commit().await?;
-            return Ok(UpsertJoinOutcome::Bound);
+            Ok(UpsertJoinOutcome::Bound)
         }
-        Some(("approved", _)) => {
-            tx.commit().await?;
-            return Ok(UpsertJoinOutcome::NameAlreadyClaimed);
+        Err(sqlx::Error::Database(err)) if err.code().as_deref() == Some("23505") => {
+            tx.rollback().await?;
+            Ok(UpsertJoinOutcome::NameAlreadyClaimed)
         }
-        Some(_) => {
-            let update = sqlx::query(
-                "UPDATE dntls_applications \
-                 SET fqdn = $3, status = 'approved', approved_at = now(), \
-                     approved_by = $4 \
-                 WHERE community_id = $1 AND pubkey = $2 AND status = 'pending'",
-            )
-            .bind(community.as_uuid())
-            .bind(pubkey)
-            .bind(fqdn)
-            .bind(approved_by)
-            .execute(&mut *tx)
-            .await;
-            match update {
-                Ok(_) => {}
-                Err(sqlx::Error::Database(err)) if err.code().as_deref() == Some("23505") => {
-                    tx.commit().await?;
-                    return Ok(UpsertJoinOutcome::NameAlreadyClaimed);
-                }
-                Err(err) => return Err(err.into()),
-            }
-        }
-        None => {
-            let insert = sqlx::query(
-                "INSERT INTO dntls_applications \
-                 (community_id, pubkey, fqdn, status, approved_at, approved_by) \
-                 VALUES ($1, $2, $3, 'approved', now(), $4)",
-            )
-            .bind(community.as_uuid())
-            .bind(pubkey)
-            .bind(fqdn)
-            .bind(approved_by)
-            .execute(&mut *tx)
-            .await;
-            match insert {
-                Ok(_) => {}
-                Err(sqlx::Error::Database(err)) if err.code().as_deref() == Some("23505") => {
-                    tx.commit().await?;
-                    return Ok(UpsertJoinOutcome::NameAlreadyClaimed);
-                }
-                Err(err) => return Err(err.into()),
-            }
-        }
+        Err(err) => Err(err.into()),
     }
-
-    tx.commit().await?;
-    Ok(UpsertJoinOutcome::Bound)
 }
 
 /// Returns the application for `pubkey` in `community`, or `None`.
@@ -345,7 +306,8 @@ impl Db {
         upsert_pending_application(&self.pool, community, pubkey, fqdn).await
     }
 
-    /// Bind this pubkey to a DNTLS name as an approved mapping.
+    /// Bind a verified DNTLS name, replacing its former key in auto mode.
+    /// See [`upsert_approved_application`] for proof and conflict requirements.
     #[datastore_span(name = "upsert_dntls_approved_application", system = "postgresql")]
     pub async fn upsert_dntls_approved_application(
         &self,
@@ -396,5 +358,171 @@ impl Db {
         pubkey: &str,
     ) -> Result<bool> {
         reject_application(&self.pool, community, pubkey).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_db() -> (Db, CommunityId) {
+        let url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .expect("BUZZ_TEST_DATABASE_URL must point to a migrated test database");
+        let db = Db::from_pool(PgPool::connect(&url).await.expect("connect test database"));
+        let host = format!("dntls-store-{}.example", uuid::Uuid::new_v4().simple());
+        db.ensure_configured_community(&host)
+            .await
+            .expect("community");
+        let community = db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community")
+            .id;
+        (db, community)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_concurrent_rebinding_is_scoped_and_idempotent() {
+        let (db, community) = test_db().await;
+        let (_, other) = test_db().await;
+        let first = "aa".repeat(32);
+        let second = "bb".repeat(32);
+        let third = "cc".repeat(32);
+        for scope in [community, other] {
+            assert_eq!(
+                db.upsert_dntls_approved_application(scope, &first, "alice.example", &first)
+                    .await
+                    .expect("seed"),
+                UpsertJoinOutcome::Bound
+            );
+        }
+        let (left, right) = tokio::join!(
+            db.upsert_dntls_approved_application(community, &second, "alice.example", &second),
+            db.upsert_dntls_approved_application(community, &third, "alice.example", &third),
+        );
+        assert_eq!(left.expect("second binding"), UpsertJoinOutcome::Bound);
+        assert_eq!(right.expect("third binding"), UpsertJoinOutcome::Bound);
+        let rows = db
+            .list_dntls_applications(community, "approved")
+            .await
+            .expect("list");
+        assert_eq!(rows.len(), 1);
+        let winner = &rows[0];
+        assert!(winner.pubkey == second || winner.pubkey == third);
+        assert_eq!(winner.fqdn, "alice.example");
+        assert!(db
+            .get_dntls_application(community, &first)
+            .await
+            .expect("old key")
+            .is_none());
+        assert_eq!(
+            db.get_dntls_application(other, &first)
+                .await
+                .expect("other community")
+                .expect("unchanged binding")
+                .fqdn,
+            "alice.example"
+        );
+
+        assert_eq!(
+            db.upsert_dntls_approved_application(
+                community,
+                &winner.pubkey,
+                "alice.example",
+                &winner.pubkey,
+            )
+            .await
+            .expect("repeat"),
+            UpsertJoinOutcome::Bound
+        );
+        assert_eq!(
+            db.get_dntls_application(community, &winner.pubkey)
+                .await
+                .expect("lookup")
+                .expect("mapping"),
+            *winner
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_rebinding_preserves_another_approved_name() {
+        let (db, community) = test_db().await;
+        let first = "aa".repeat(32);
+        let second = "bb".repeat(32);
+        db.upsert_dntls_approved_application(community, &first, "alice.example", &first)
+            .await
+            .expect("first binding");
+        db.upsert_dntls_approved_application(community, &second, "bob.example", &second)
+            .await
+            .expect("second binding");
+        let before = db
+            .list_dntls_applications(community, "approved")
+            .await
+            .expect("before");
+        assert_eq!(
+            db.upsert_dntls_approved_application(community, &second, "alice.example", &second)
+                .await
+                .expect("conflicting binding"),
+            UpsertJoinOutcome::NameAlreadyClaimed
+        );
+        assert_eq!(
+            db.list_dntls_applications(community, "approved")
+                .await
+                .expect("after"),
+            before
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_auto_rebinding_replaces_pending_but_approve_does_not() {
+        let (db, community) = test_db().await;
+        let first = "aa".repeat(32);
+        let second = "bb".repeat(32);
+        db.upsert_dntls_pending_application(community, &first, "alice.example")
+            .await
+            .expect("first pending");
+        db.upsert_dntls_pending_application(community, &second, "bob.example")
+            .await
+            .expect("second pending");
+        assert_eq!(
+            db.upsert_dntls_pending_application(community, &second, "alice.example")
+                .await
+                .expect("approve conflict"),
+            UpsertJoinOutcome::NameAlreadyClaimed
+        );
+        assert_eq!(
+            db.upsert_dntls_approved_application(community, &second, "alice.example", &second)
+                .await
+                .expect("auto rebind"),
+            UpsertJoinOutcome::Bound
+        );
+        assert!(db
+            .list_dntls_applications(community, "pending")
+            .await
+            .expect("pending")
+            .is_empty());
+        let rows = db
+            .list_dntls_applications(community, "approved")
+            .await
+            .expect("approved");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pubkey, second);
+        assert_eq!(rows[0].fqdn, "alice.example");
+        assert_eq!(
+            db.upsert_dntls_pending_application(community, &first, "alice.example")
+                .await
+                .expect("approved conflict"),
+            UpsertJoinOutcome::NameAlreadyClaimed
+        );
+        assert_eq!(
+            db.list_dntls_applications(community, "approved")
+                .await
+                .expect("unchanged"),
+            rows
+        );
     }
 }
