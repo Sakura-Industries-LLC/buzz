@@ -34,7 +34,7 @@ pub struct DntlsApplication {
     pub fqdn: String,
     /// `pending` or `approved`.
     pub status: String,
-    /// When the application was first created (or last replaced while pending).
+    /// When created, replaced while pending, or rebound to a different pubkey.
     pub created_at: DateTime<Utc>,
     /// When an owner/admin approved the application, if approved.
     pub approved_at: Option<DateTime<Utc>>,
