@@ -1,5 +1,20 @@
 # Changelog
 
+## relay-v0.2.2
+
+First versioned relay image for the Sakura DNTLS fork; previous fork builds
+used the rolling `dntls` image tag. The image includes the fork's native DNTLS
+mutual TLS and verified-name admission.
+
+- Fix verified-name rebinding after a reinstall or signing-key rotation in
+  `BUZZ_DNTLS_ADMISSION=auto` ([#26](https://github.com/Sakura-Industries-LLC/buzz/pull/26)).
+  The new key receives membership and NIP-43 announcements; the old key loses
+  the name mapping but retains ordinary membership and roles.
+- Keep `approve` and `off` admission behavior unchanged. No new database
+  migration is required for the rebinding fix.
+
+[Changes since relay-v0.2.1](https://github.com/Sakura-Industries-LLC/buzz/compare/relay-v0.2.1...relay-v0.2.2)
+
 ## relay-v0.2.1
 
 - fix(sdk): preserve self-mention p tags in message and forum event builders ([#4975](https://github.com/block/buzz/pull/4975)) ([`78c87ae20e`](https://github.com/block/buzz/commit/78c87ae20e182fffdd99744d6c9ff99df82b159c))
