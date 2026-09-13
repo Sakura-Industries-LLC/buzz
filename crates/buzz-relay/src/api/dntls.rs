@@ -6,6 +6,13 @@
 //! or the first NIP-98-signed request when
 //! [`crate::config::DntlsAdmission`] is not `Off`.
 //!
+//! In `auto` mode the latest verified caller can replace the name's previous
+//! key. The new key follows normal membership admission and NIP-43 publication;
+//! the old key loses the name mapping but retains its membership and roles.
+//! A key already approved for another name cannot take a second mapping.
+//! In `approve` mode connections cannot replace another key's pending or
+//! approved mapping.
+//!
 //! HTTP routes (all NIP-98 signed, outside the Nostr event data plane):
 //!
 //! - `GET /api/dntls/pending` — list pending applications. Owner/admin only.
@@ -39,7 +46,7 @@ const APPROVE_PATH: &str = "/api/dntls/approve";
 const REJECT_PATH: &str = "/api/dntls/reject";
 const NAMES_PATH: &str = "/api/dntls/names";
 
-/// NOTICE sent when a verified name is already bound to another pubkey.
+/// NOTICE sent when an existing mapping prevents admission.
 pub(crate) const NAME_ALREADY_CLAIMED_NOTICE: &str = "dntls: name already claimed";
 
 const DNTLS_NAME_HEADER: &str = crate::dntls::NAME_HEADER;
@@ -50,8 +57,8 @@ const MAX_FQDN_LEN: usize = 255;
 pub(crate) enum AdmissionEffect {
     /// Mapping written or refreshed; AUTH should continue.
     Applied,
-    /// The name is already bound to a different pubkey. AUTH continues as an
-    /// ordinary (non-verified) member if membership allows.
+    /// A name or key mapping conflicts with admission policy. AUTH continues
+    /// as an ordinary member if membership allows.
     NameClaimed,
 }
 
@@ -252,7 +259,7 @@ pub(crate) async fn apply_auth_admission(
 ///
 /// No-op when admission is off or the header is absent. A claimed name cannot
 /// send a NOTICE over HTTP; the caller proceeds to ordinary membership.
-/// Safe to call once per request: binding is first-write-wins and idempotent.
+/// Repeating the same approved name/key pair leaves the mapping unchanged.
 pub(crate) async fn apply_http_admission(
     state: &Arc<AppState>,
     tenant: &TenantContext,
@@ -603,7 +610,11 @@ mod tests {
             .header(header::HOST, host)
             .header(header::AUTHORIZATION, auth);
         if let Some(name) = dntls_name {
-            builder = builder.header(DNTLS_NAME_HEADER, name);
+            builder = builder.extension(axum::extract::ConnectInfo(crate::dntls::DntlsPeer {
+                addr: "127.0.0.1:1234".parse().expect("socket address"),
+                name: name.to_string(),
+                community: Arc::from(host),
+            }));
         }
         if !body.is_empty() {
             builder = builder.header(header::CONTENT_TYPE, "application/json");
@@ -867,54 +878,122 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn dntls_first_bound_wins_sends_notice() {
-        let host = format!("dntls-conflict-{}.example", Uuid::new_v4().simple());
+    async fn dntls_auto_rebinds_name_after_key_rotation() {
+        let host = format!("dntls-rebind-{}.example", Uuid::new_v4().simple());
         let first = Keys::generate();
         let second = Keys::generate();
-        let state = dntls_test_state(&host, DntlsAdmission::Auto)
+        let state = dntls_test_state_on(&host, DntlsAdmission::Auto, TEST_REDIS_URL)
             .await
-            .expect("requires reachable Postgres and relay test state");
-        let community = state
-            .db
-            .lookup_community_by_host(&host)
-            .await
-            .expect("lookup")
-            .expect("community exists");
-        state
-            .db
-            .add_relay_member(community.id, &second.public_key().to_hex(), "member", None)
-            .await
-            .expect("seed second member");
+            .expect("requires reachable Postgres, Redis, and relay test state");
 
-        let (ok, _) = auth_connection(state.clone(), &host, &first, Some("shared.example")).await;
-        assert!(ok);
+        let (ok, messages) =
+            auth_connection(state.clone(), &host, &first, Some("shared.example")).await;
+        assert!(ok, "first AUTH: {messages:?}");
+        let (ok, _) = auth_connection(state.clone(), &host, &second, None).await;
+        assert!(
+            !ok,
+            "a new key without a verified name must not be admitted"
+        );
+
+        let response = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/query")
+                    .header(header::HOST, &host)
+                    .header(
+                        header::AUTHORIZATION,
+                        nip98_auth_header(&second, "POST", &format!("https://{host}/query"), b"[]"),
+                    )
+                    .header(DNTLS_NAME_HEADER, "shared.example")
+                    .body(Body::from("[]"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a forged identity header must not replace the binding"
+        );
 
         let (ok, messages) =
             auth_connection(state.clone(), &host, &second, Some("shared.example")).await;
-        assert!(
-            ok,
-            "AUTH still succeeds as an ordinary member: {messages:?}"
-        );
+        assert!(ok, "rotated key AUTH must succeed: {messages:?}");
         assert!(
             messages
                 .iter()
-                .any(|msg| msg.contains(NAME_ALREADY_CLAIMED_NOTICE)),
+                .all(|msg| !msg.contains(NAME_ALREADY_CLAIMED_NOTICE)),
             "{messages:?}"
         );
 
-        let row = state
-            .db
-            .get_dntls_application(community.id, &first.public_key().to_hex())
-            .await
-            .expect("lookup")
-            .expect("first mapping");
-        assert_eq!(row.fqdn, "shared.example");
-        let stolen = state
-            .db
-            .get_dntls_application(community.id, &second.public_key().to_hex())
-            .await
-            .expect("lookup");
-        assert!(stolen.is_none());
+        // Possessing the old Nostr key alone cannot reclaim the name. Its
+        // ordinary membership is retained; rebinding is not account migration.
+        let (ok, messages) = auth_connection(state.clone(), &host, &first, None).await;
+        assert!(ok, "old key retains ordinary membership: {messages:?}");
+        let response = send(
+            state.clone(),
+            &host,
+            Method::GET,
+            NAMES_PATH,
+            &second,
+            String::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = read_json(response).await;
+        let names = json["names"].as_array().expect("names");
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0]["pubkey"], second.public_key().to_hex());
+        assert_eq!(names[0]["fqdn"], "shared.example");
+
+        // Members discover the new key through the normal NIP-43 events.
+        let response = send(
+            state.clone(),
+            &host,
+            Method::POST,
+            "/query",
+            &second,
+            r#"[{"kinds":[8000,13534]}]"#.to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let events = read_json(response).await;
+        let events = events.as_array().expect("events");
+        for (kind, tag_name) in [(8000, "p"), (13534, "member")] {
+            assert!(
+                events.iter().any(|event| {
+                    event["kind"] == kind
+                        && event["tags"]
+                            .as_array()
+                            .expect("tags")
+                            .iter()
+                            .any(|tag| tag[0] == tag_name && tag[1] == second.public_key().to_hex())
+                }),
+                "missing NIP-43 kind {kind} for the new key: {events:?}"
+            );
+        }
+
+        // The HTTP admission path must also replace a binding, not only AUTH.
+        let third = Keys::generate();
+        let response = send_with_dntls(
+            state.clone(),
+            &host,
+            Method::POST,
+            "/query",
+            &third,
+            "[]".to_string(),
+            Some("shared.example"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = send(state, &host, Method::GET, NAMES_PATH, &third, String::new()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = read_json(response).await;
+        let names = json["names"].as_array().expect("names");
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0]["pubkey"], third.public_key().to_hex());
+        assert_eq!(names[0]["fqdn"], "shared.example");
     }
 
     #[tokio::test]

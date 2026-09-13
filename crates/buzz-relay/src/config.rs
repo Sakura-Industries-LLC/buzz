@@ -388,7 +388,8 @@ pub enum DntlsAdmission {
     /// Verified names ignored; every `/api/dntls` route returns 404.
     #[default]
     Off,
-    /// Bind pubkey↔name at first successful AUTH or NIP-98 request and admit as a member.
+    /// Bind the verified name to the signing key at AUTH or NIP-98, replacing
+    /// its former key, and admit as a member. Former membership is retained.
     Auto,
     /// Create or refresh a pending application; owners/admins admit it.
     Approve,
