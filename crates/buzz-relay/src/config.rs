@@ -361,6 +361,16 @@ pub struct Config {
     /// `Off` (default) ignores verified names and 404s every `/api/dntls` route.
     pub dntls_admission: DntlsAdmission,
 
+    /// Exact DNTLS names granted admin on verified admission (`BUZZ_DNTLS_ADMINS`).
+    ///
+    /// Comma-separated FQDNs, lowercased and trimmed. Empty (default) grants
+    /// no names. A listed name is admitted immediately in every mode, including
+    /// `approve`, and inserted or promoted to `admin`. The role follows the
+    /// name when it rebinds to a new key; `owner` rows are never changed.
+    /// Removing a name from this list does not demote anyone at startup —
+    /// that is a manual admin action.
+    pub dntls_admins: Vec<String>,
+
     /// Native DNTLS mutual TLS on the main listener (`BUZZ_DNTLS_CREDENTIALS_FILE`).
     /// Absent means the listener speaks plain TCP as upstream Buzz does.
     pub dntls_tls: Option<DntlsTlsConfig>,
@@ -529,6 +539,47 @@ fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
 
 fn parse_optional_bool(name: &str) -> Result<bool, ConfigError> {
     parse_bool(name, false)
+}
+
+fn parse_dntls_admins(raw: &str) -> Result<Vec<String>, ConfigError> {
+    let mut admins = Vec::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim().to_ascii_lowercase();
+        if entry.is_empty() {
+            continue;
+        }
+        if !is_plausible_fqdn(&entry) {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_DNTLS_ADMINS entry is not a valid FQDN: {entry:?}"
+            )));
+        }
+        if !admins.contains(&entry) {
+            admins.push(entry);
+        }
+    }
+    Ok(admins)
+}
+
+fn is_plausible_fqdn(name: &str) -> bool {
+    if name.len() > 253 {
+        return false;
+    }
+    let mut labels = 0usize;
+    for label in name.split('.') {
+        labels += 1;
+        if label.is_empty() || label.len() > 63 {
+            return false;
+        }
+        let valid = label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && !label.starts_with('-')
+            && !label.ends_with('-');
+        if !valid {
+            return false;
+        }
+    }
+    labels >= 2
 }
 
 fn ensure_git_repo_path(
@@ -1233,6 +1284,15 @@ impl Config {
                 }
             },
         };
+        let dntls_admins = match std::env::var("BUZZ_DNTLS_ADMINS") {
+            Ok(raw) => parse_dntls_admins(&raw)?,
+            Err(_) => Vec::new(),
+        };
+        if !dntls_admins.is_empty() && dntls_admission == DntlsAdmission::Off {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_DNTLS_ADMINS requires BUZZ_DNTLS_ADMISSION=auto or approve".to_string(),
+            ));
+        }
 
         let dntls_tls = std::env::var("BUZZ_DNTLS_CREDENTIALS_FILE")
             .ok()
@@ -1330,6 +1390,7 @@ impl Config {
             push_gateway_timeout,
             join_policy,
             dntls_admission,
+            dntls_admins,
             dntls_tls,
             admin,
             web_dir,
@@ -1452,6 +1513,10 @@ mod tests {
             config.dntls_admission,
             DntlsAdmission::Off,
             "dntls_admission should default to off"
+        );
+        assert!(
+            config.dntls_admins.is_empty(),
+            "dntls_admins should default empty"
         );
         assert_eq!(
             config.media.s3_addressing_style,
@@ -2433,6 +2498,134 @@ mod tests {
             result,
             Err(ConfigError::InvalidValue(ref msg)) if msg.contains("BUZZ_DNTLS_ADMISSION")
         ));
+    }
+
+    #[test]
+    fn dntls_admins_parses_exact_fqdns_and_defaults_empty() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_admission = std::env::var("BUZZ_DNTLS_ADMISSION").ok();
+        let previous_admins = std::env::var("BUZZ_DNTLS_ADMINS").ok();
+
+        std::env::remove_var("BUZZ_DNTLS_ADMISSION");
+        std::env::remove_var("BUZZ_DNTLS_ADMINS");
+        let config = Config::from_env().expect("config");
+        assert!(config.dntls_admins.is_empty());
+
+        std::env::set_var("BUZZ_DNTLS_ADMISSION", "auto");
+        std::env::set_var(
+            "BUZZ_DNTLS_ADMINS",
+            " Josh.DNTLS , alice.dntls ,josh.dntls",
+        );
+        let config = Config::from_env().expect("config");
+        assert_eq!(
+            config.dntls_admins,
+            vec!["josh.dntls".to_string(), "alice.dntls".to_string()]
+        );
+
+        std::env::set_var("BUZZ_DNTLS_ADMINS", "");
+        let config = Config::from_env().expect("config");
+        assert!(config.dntls_admins.is_empty());
+
+        std::env::remove_var("BUZZ_DNTLS_ADMISSION");
+        std::env::remove_var("BUZZ_DNTLS_ADMINS");
+        if let Some(value) = previous_admission {
+            std::env::set_var("BUZZ_DNTLS_ADMISSION", value);
+        }
+        if let Some(value) = previous_admins {
+            std::env::set_var("BUZZ_DNTLS_ADMINS", value);
+        }
+    }
+
+    #[test]
+    fn dntls_admins_require_auto_or_approve_admission() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_admission = std::env::var("BUZZ_DNTLS_ADMISSION").ok();
+        let previous_admins = std::env::var("BUZZ_DNTLS_ADMINS").ok();
+
+        std::env::set_var("BUZZ_DNTLS_ADMINS", "josh.dntls");
+        std::env::remove_var("BUZZ_DNTLS_ADMISSION");
+        let unset = Config::from_env();
+
+        std::env::set_var("BUZZ_DNTLS_ADMISSION", "off");
+        let off = Config::from_env();
+
+        std::env::set_var("BUZZ_DNTLS_ADMISSION", "approve");
+        let approve = Config::from_env();
+
+        std::env::remove_var("BUZZ_DNTLS_ADMISSION");
+        std::env::remove_var("BUZZ_DNTLS_ADMINS");
+        if let Some(value) = previous_admission {
+            std::env::set_var("BUZZ_DNTLS_ADMISSION", value);
+        }
+        if let Some(value) = previous_admins {
+            std::env::set_var("BUZZ_DNTLS_ADMINS", value);
+        }
+
+        assert!(
+            matches!(
+                &unset,
+                Err(ConfigError::InvalidValue(msg))
+                    if msg.contains("BUZZ_DNTLS_ADMINS")
+                        && msg.contains("BUZZ_DNTLS_ADMISSION")
+            ),
+            "unset admission must reject nonempty admins: {unset:?}"
+        );
+        assert!(
+            matches!(
+                &off,
+                Err(ConfigError::InvalidValue(msg))
+                    if msg.contains("BUZZ_DNTLS_ADMINS")
+                        && msg.contains("BUZZ_DNTLS_ADMISSION")
+            ),
+            "off admission must reject nonempty admins: {off:?}"
+        );
+        let approve = approve.expect("approve admits listed admins");
+        assert_eq!(approve.dntls_admins, vec!["josh.dntls".to_string()]);
+    }
+
+    #[test]
+    fn dntls_admins_reject_malformed_names() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_admission = std::env::var("BUZZ_DNTLS_ADMISSION").ok();
+        let previous_admins = std::env::var("BUZZ_DNTLS_ADMINS").ok();
+
+        std::env::set_var("BUZZ_DNTLS_ADMISSION", "auto");
+        let long_label = format!("{}.dntls", "a".repeat(64));
+        let long_name = format!("{}.b", "a".repeat(252));
+        let cases = [
+            "*.dntls",
+            "https://josh.dntls",
+            "josh..dntls",
+            "josh.dntls.",
+            "-josh.dntls",
+            "josh-.dntls",
+            long_label.as_str(),
+            long_name.as_str(),
+        ];
+        let mut results = Vec::new();
+        for bad in cases {
+            std::env::set_var("BUZZ_DNTLS_ADMINS", bad);
+            results.push((bad.to_string(), Config::from_env()));
+        }
+
+        std::env::remove_var("BUZZ_DNTLS_ADMISSION");
+        std::env::remove_var("BUZZ_DNTLS_ADMINS");
+        if let Some(value) = previous_admission {
+            std::env::set_var("BUZZ_DNTLS_ADMISSION", value);
+        }
+        if let Some(value) = previous_admins {
+            std::env::set_var("BUZZ_DNTLS_ADMINS", value);
+        }
+
+        for (bad, result) in results {
+            assert!(
+                matches!(
+                    &result,
+                    Err(ConfigError::InvalidValue(msg)) if msg.contains("BUZZ_DNTLS_ADMINS")
+                ),
+                "malformed {bad:?} must be rejected: {result:?}"
+            );
+        }
     }
 
     #[test]

@@ -117,6 +117,14 @@ NIP-98-signed request:
 | `auto` | At first successful NIP-42 AUTH or the first NIP-98-signed request, bind `nostr pubkey ↔ dntls fqdn` for that community and admit the pubkey as a member. |
 | `approve` | Create or refresh a pending application. Owners/admins admit it with `POST /api/dntls/approve` (or reject with `POST /api/dntls/reject`). |
 
+`BUZZ_DNTLS_ADMINS` is a comma-separated list of exact DNTLS FQDNs (trimmed,
+lowercased; empty means none). A listed name is admitted immediately in every
+mode, including `approve`, and is inserted or promoted to `admin`. The admin
+role follows the name when it rebinds to a new key; `owner` is never changed.
+Removing a name from the list does not demote existing admins at startup;
+that remains a manual admin action. A nonempty list requires
+`BUZZ_DNTLS_ADMISSION=auto` or `approve`; malformed entries fail startup.
+
 First-bound-wins: if the fqdn is already mapped to a different pubkey in that
 community, the name is not re-bound. The request still proceeds as an ordinary
 (non-verified) member if membership allows. WebSocket AUTH sends
