@@ -266,13 +266,10 @@ pub async fn upsert_approved_application(
             let displaced = previous.filter(|held| held != pubkey);
             let membership_changed = if is_admin {
                 if let Some(old) = displaced.as_deref() {
-                    super::relay_members::demote_relay_admin_to_member_on(
-                        &mut *tx, community, old,
-                    )
-                    .await?;
+                    super::relay_members::demote_relay_admin_to_member_on(&mut *tx, community, old)
+                        .await?;
                 }
-                super::relay_members::grant_relay_admin_on(&mut *tx, community, pubkey)
-                    .await?
+                super::relay_members::grant_relay_admin_on(&mut *tx, community, pubkey).await?
             } else {
                 false
             };
@@ -388,15 +385,8 @@ impl Db {
         approved_by: &str,
         is_admin: bool,
     ) -> Result<UpsertJoinOutcome> {
-        upsert_approved_application(
-            &self.pool,
-            community,
-            pubkey,
-            fqdn,
-            approved_by,
-            is_admin,
-        )
-        .await
+        upsert_approved_application(&self.pool, community, pubkey, fqdn, approved_by, is_admin)
+            .await
     }
 
     /// Returns the DNTLS application for `pubkey` in `community`, or `None`.
@@ -499,21 +489,21 @@ mod tests {
         let third = "cc".repeat(32);
         for scope in [community, other] {
             assert_eq!(
-                db.upsert_dntls_approved_application(
-                    scope, &first, "alice.example", &first, false
-                )
-                .await
-                .expect("seed"),
+                db.upsert_dntls_approved_application(scope, &first, "alice.example", &first, false)
+                    .await
+                    .expect("seed"),
                 bound(None, false)
             );
         }
         let (left, right) = tokio::join!(
             db.upsert_dntls_approved_application(
-                community, &second, "alice.example", &second, false
+                community,
+                &second,
+                "alice.example",
+                &second,
+                false
             ),
-            db.upsert_dntls_approved_application(
-                community, &third, "alice.example", &third, false
-            ),
+            db.upsert_dntls_approved_application(community, &third, "alice.example", &third, false),
         );
         let left_displaced = assert_non_admin_rebind(left.expect("second binding"));
         let right_displaced = assert_non_admin_rebind(right.expect("third binding"));
@@ -570,22 +560,18 @@ mod tests {
         let first = "aa".repeat(32);
         let second = "bb".repeat(32);
         assert_eq!(
-            db.upsert_dntls_approved_application(
-                community, &first, "alice.example", &first, true
-            )
-            .await
-            .expect("first binding"),
+            db.upsert_dntls_approved_application(community, &first, "alice.example", &first, true)
+                .await
+                .expect("first binding"),
             bound(None, true)
         );
         db.add_relay_member(community, &second, "member", None)
             .await
             .expect("seed member");
         assert_eq!(
-            db.upsert_dntls_approved_application(
-                community, &second, "bob.example", &second, false
-            )
-            .await
-            .expect("second binding"),
+            db.upsert_dntls_approved_application(community, &second, "bob.example", &second, false)
+                .await
+                .expect("second binding"),
             bound(None, false)
         );
         let before = db
@@ -594,7 +580,11 @@ mod tests {
             .expect("before");
         assert_eq!(
             db.upsert_dntls_approved_application(
-                community, &second, "alice.example", &second, true
+                community,
+                &second,
+                "alice.example",
+                &second,
+                true
             )
             .await
             .expect("conflicting binding"),
@@ -636,7 +626,11 @@ mod tests {
         );
         assert_eq!(
             db.upsert_dntls_approved_application(
-                community, &second, "alice.example", &second, false
+                community,
+                &second,
+                "alice.example",
+                &second,
+                false
             )
             .await
             .expect("auto rebind"),
@@ -678,19 +672,15 @@ mod tests {
         let first = "aa".repeat(32);
         let second = "bb".repeat(32);
         let third = "cc".repeat(32);
-        db.bootstrap_owner(community, &owner)
-            .await
-            .expect("owner");
+        db.bootstrap_owner(community, &owner).await.expect("owner");
         db.add_relay_member(community, &first, "member", None)
             .await
             .expect("seed member");
 
         assert_eq!(
-            db.upsert_dntls_approved_application(
-                community, &first, "alice.example", &first, true
-            )
-            .await
-            .expect("promote member"),
+            db.upsert_dntls_approved_application(community, &first, "alice.example", &first, true)
+                .await
+                .expect("promote member"),
             bound(None, true)
         );
         assert_eq!(
@@ -698,17 +688,19 @@ mod tests {
             Some("admin")
         );
         assert_eq!(
-            db.upsert_dntls_approved_application(
-                community, &first, "alice.example", &first, true
-            )
-            .await
-            .expect("repeat admin"),
+            db.upsert_dntls_approved_application(community, &first, "alice.example", &first, true)
+                .await
+                .expect("repeat admin"),
             bound(None, false)
         );
 
         assert_eq!(
             db.upsert_dntls_approved_application(
-                community, &second, "alice.example", &second, true
+                community,
+                &second,
+                "alice.example",
+                &second,
+                true
             )
             .await
             .expect("admin rebind"),
@@ -724,11 +716,9 @@ mod tests {
         );
 
         assert_eq!(
-            db.upsert_dntls_approved_application(
-                community, &owner, "alice.example", &owner, true
-            )
-            .await
-            .expect("owner bind"),
+            db.upsert_dntls_approved_application(community, &owner, "alice.example", &owner, true)
+                .await
+                .expect("owner bind"),
             bound(Some(second.as_str()), false)
         );
         assert_eq!(
@@ -741,11 +731,9 @@ mod tests {
         );
 
         assert_eq!(
-            db.upsert_dntls_approved_application(
-                community, &third, "alice.example", &third, true
-            )
-            .await
-            .expect("displace owner"),
+            db.upsert_dntls_approved_application(community, &third, "alice.example", &third, true)
+                .await
+                .expect("displace owner"),
             bound(Some(owner.as_str()), true)
         );
         assert_eq!(
@@ -758,11 +746,9 @@ mod tests {
         );
 
         assert_eq!(
-            db.upsert_dntls_approved_application(
-                community, &first, "alice.example", &first, false
-            )
-            .await
-            .expect("non-admin rebind"),
+            db.upsert_dntls_approved_application(community, &first, "alice.example", &first, false)
+                .await
+                .expect("non-admin rebind"),
             bound(Some(third.as_str()), false)
         );
         assert_eq!(
@@ -793,11 +779,13 @@ mod tests {
 
         let (left, right) = tokio::join!(
             db.upsert_dntls_approved_application(
-                community, &second, "alice.example", &second, true
+                community,
+                &second,
+                "alice.example",
+                &second,
+                true
             ),
-            db.upsert_dntls_approved_application(
-                community, &third, "alice.example", &third, true
-            ),
+            db.upsert_dntls_approved_application(community, &third, "alice.example", &third, true),
         );
         let left = left.expect("second admin bind");
         let right = right.expect("third admin bind");
@@ -838,20 +826,14 @@ mod tests {
         );
 
         assert_eq!(
-            db.upsert_dntls_approved_application(
-                community, &first, "bob.example", &first, true
-            )
-            .await
-            .expect("seed bob"),
+            db.upsert_dntls_approved_application(community, &first, "bob.example", &first, true)
+                .await
+                .expect("seed bob"),
             bound(None, true)
         );
         let (left, right) = tokio::join!(
-            db.upsert_dntls_approved_application(
-                community, &second, "bob.example", &second, true
-            ),
-            db.upsert_dntls_approved_application(
-                community, &third, "bob.example", &third, true
-            ),
+            db.upsert_dntls_approved_application(community, &second, "bob.example", &second, true),
+            db.upsert_dntls_approved_application(community, &third, "bob.example", &third, true),
         );
         for outcome in [left.expect("second bob"), right.expect("third bob")] {
             match outcome {

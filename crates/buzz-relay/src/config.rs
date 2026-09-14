@@ -2512,10 +2512,7 @@ mod tests {
         assert!(config.dntls_admins.is_empty());
 
         std::env::set_var("BUZZ_DNTLS_ADMISSION", "auto");
-        std::env::set_var(
-            "BUZZ_DNTLS_ADMINS",
-            " Josh.DNTLS , alice.dntls ,josh.dntls",
-        );
+        std::env::set_var("BUZZ_DNTLS_ADMINS", " Josh.DNTLS , alice.dntls ,josh.dntls");
         let config = Config::from_env().expect("config");
         assert_eq!(
             config.dntls_admins,
@@ -2591,8 +2588,11 @@ mod tests {
 
         std::env::set_var("BUZZ_DNTLS_ADMISSION", "auto");
         let long_label = format!("{}.dntls", "a".repeat(64));
-        let long_name = format!("{}.b", "a".repeat(252));
+        let long_name = vec!["a".repeat(63); 4].join(".");
         let cases = [
+            "josh",
+            "josh name.dntls",
+            "josh_name.dntls",
             "*.dntls",
             "https://josh.dntls",
             "josh..dntls",

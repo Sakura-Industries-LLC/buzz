@@ -102,11 +102,10 @@ relay to specific external Nostr identities without granting full access.
 
 ### DNTLS admission
 
-A DNTLS gateway terminates mutual TLS in front of the relay and forwards the
-verified name on every proxied request, including the WebSocket upgrade, as
-`X-DNTLS-Name`. The value is the verified DNTLS FQDN, lowercased. The relay
-trusts that header unconditionally when admission is enabled. Bind the relay
-to loopback behind the gateway so clients cannot set the header themselves.
+With `BUZZ_DNTLS_CREDENTIALS_FILE` set, the relay's native listener verifies
+the caller's DNTLS identity during mutual TLS. Middleware strips any inbound
+`X-DNTLS-Name` and stamps the verified, lowercased FQDN from the connection.
+Clients cannot claim a name by supplying that header themselves.
 
 `BUZZ_DNTLS_ADMISSION` selects the behaviour at NIP-42 AUTH or the first
 NIP-98-signed request:
@@ -125,11 +124,14 @@ Removing a name from the list does not demote existing admins at startup;
 that remains a manual admin action. A nonempty list requires
 `BUZZ_DNTLS_ADMISSION=auto` or `approve`; malformed entries fail startup.
 
-First-bound-wins: if the fqdn is already mapped to a different pubkey in that
-community, the name is not re-bound. The request still proceeds as an ordinary
-(non-verified) member if membership allows. WebSocket AUTH sends
-`NOTICE dntls: name already claimed`; HTTP has no NOTICE channel. Reconnects
-and repeat NIP-98 requests are idempotent.
+In `auto` mode, or for a listed admin in `approve` mode, a verified name can
+rebind to a new key. The displaced key keeps ordinary membership; a listed
+name's displaced `admin` becomes `member` in the same transaction that grants
+the new key `admin`. Owners are never demoted. Other `approve` applications
+cannot replace a name held by another key, and no key can hold two approved
+names in one community. A refused binding still permits ordinary membership:
+WebSocket AUTH sends `NOTICE dntls: name already claimed`; HTTP has no NOTICE
+channel. Repeating the same binding is idempotent.
 
 The deployment community host must equal the DNTLS name: `RELAY_URL=wss://<name>`
 seeds it, and the connector forwards `Host: <name>`. Desktop AUTH `relay` tags
