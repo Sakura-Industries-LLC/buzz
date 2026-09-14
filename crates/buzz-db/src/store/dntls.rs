@@ -65,23 +65,19 @@ fn map_application_row(row: &sqlx::postgres::PgRow) -> DntlsApplication {
 
 const DNTLS_BIND_LOCK_NAMESPACE: &str = "buzz_dntls_bind:";
 
-/// Serialize name binding even when no `dntls_applications` row exists yet.
+/// Serialize binding mutations within a community, including missing rows.
 ///
-/// PostgreSQL 17 has no `OLD` table in `RETURNING`, so displaced-key capture
-/// is a pre-read under this lock. Pending and approved upserts share it so a
-/// pending insert cannot land between the pre-read and the approved write.
-async fn lock_verified_name(
+/// Replacing a pending application can change both its source and destination
+/// names. One community lock keeps displacement reads and role changes ordered
+/// across both names without cross-name lock ordering or stale MVCC reads.
+async fn lock_application_bindings(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     community: CommunityId,
-    fqdn: &str,
 ) -> Result<()> {
     crate::observability::observe_advisory_lock(
         crate::observability::LockType::Membership,
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!(
-                "{DNTLS_BIND_LOCK_NAMESPACE}{}:{fqdn}",
-                community.as_uuid()
-            ))
+            .bind(format!("{DNTLS_BIND_LOCK_NAMESPACE}{community}"))
             .execute(&mut **tx),
     )
     .await?;
@@ -101,7 +97,7 @@ pub async fn upsert_pending_application(
     fqdn: &str,
 ) -> Result<UpsertJoinOutcome> {
     let mut tx = pool.begin().await?;
-    lock_verified_name(&mut tx, community, fqdn).await?;
+    lock_application_bindings(&mut tx, community).await?;
 
     let existing_fqdn: Option<String> = sqlx::query_scalar(
         "SELECT pubkey FROM dntls_applications \
@@ -218,7 +214,7 @@ pub async fn upsert_approved_application(
     is_admin: bool,
 ) -> Result<UpsertJoinOutcome> {
     let mut tx = pool.begin().await?;
-    lock_verified_name(&mut tx, community, fqdn).await?;
+    lock_application_bindings(&mut tx, community).await?;
 
     sqlx::query(
         "DELETE FROM dntls_applications \
@@ -230,9 +226,8 @@ pub async fn upsert_approved_application(
     .execute(&mut *tx)
     .await?;
 
-    // Pre-read the holder under the name lock. PG17 cannot return OLD from
-    // ON CONFLICT, so this is the displaced-key capture. The shared lock
-    // keeps pending inserts from sneaking in between the read and the write.
+    // PostgreSQL 17 cannot return OLD from ON CONFLICT. The community lock
+    // protects this pre-read even if another claim moves a pending name.
     let previous: Option<String> = sqlx::query_scalar(
         "SELECT pubkey FROM dntls_applications \
          WHERE community_id = $1 AND fqdn = $2",
@@ -242,7 +237,7 @@ pub async fn upsert_approved_application(
     .fetch_optional(&mut *tx)
     .await?;
 
-    // The unique name key still forbids a second approved name on this pubkey.
+    // The pubkey primary key still forbids a second approved name on this key.
     let binding = sqlx::query(
         "INSERT INTO dntls_applications \
          (community_id, pubkey, fqdn, status, approved_at, approved_by) \
@@ -266,10 +261,10 @@ pub async fn upsert_approved_application(
             let displaced = previous.filter(|held| held != pubkey);
             let membership_changed = if is_admin {
                 if let Some(old) = displaced.as_deref() {
-                    super::relay_members::demote_relay_admin_to_member_on(&mut *tx, community, old)
+                    super::relay_members::demote_relay_admin_to_member_on(&mut tx, community, old)
                         .await?;
                 }
-                super::relay_members::grant_relay_admin_on(&mut *tx, community, pubkey).await?
+                super::relay_members::grant_relay_admin_on(&mut tx, community, pubkey).await?
             } else {
                 false
             };
@@ -323,25 +318,51 @@ pub async fn list_applications(
     Ok(rows.iter().map(map_application_row).collect())
 }
 
-/// Marks a pending application approved. Returns the row, or `None` if missing.
+/// Approves the expected pending name and grants membership in one transaction.
+///
+/// Returns the approved row and whether membership was inserted or promoted.
+/// A removed, rebound, or changed pending application returns `None` and grants
+/// nothing. Listed administrators use the same binding lock as connection admission.
 pub async fn approve_application(
     pool: &PgPool,
     community: CommunityId,
     pubkey: &str,
+    fqdn: &str,
     approved_by: &str,
-) -> Result<Option<DntlsApplication>> {
+    is_admin: bool,
+) -> Result<Option<(DntlsApplication, bool)>> {
+    let mut tx = pool.begin().await?;
+    lock_application_bindings(&mut tx, community).await?;
     let row = sqlx::query(
         "UPDATE dntls_applications \
          SET status = 'approved', approved_at = now(), approved_by = $3 \
-         WHERE community_id = $1 AND pubkey = $2 AND status = 'pending' \
+         WHERE community_id = $1 AND pubkey = $2 AND status = 'pending' AND fqdn = $4 \
          RETURNING pubkey, fqdn, status, created_at, approved_at, approved_by",
     )
     .bind(community.as_uuid())
     .bind(pubkey)
     .bind(approved_by)
-    .fetch_optional(pool)
+    .bind(fqdn)
+    .fetch_optional(&mut *tx)
     .await?;
-    Ok(row.as_ref().map(map_application_row))
+    let Some(row) = row else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+    let changed = if is_admin {
+        super::relay_members::grant_relay_admin_on(&mut tx, community, pubkey).await?
+    } else {
+        super::relay_members::insert_relay_member_on(
+            &mut tx,
+            community,
+            pubkey,
+            "member",
+            Some("invite"),
+        )
+        .await?
+    };
+    tx.commit().await?;
+    Ok(Some((map_application_row(&row), changed)))
 }
 
 /// Deletes a pending application. Returns `true` if a pending row was removed.
@@ -409,15 +430,17 @@ impl Db {
         list_applications(&self.pool, community, status).await
     }
 
-    /// Marks a pending DNTLS application approved.
+    /// Approves an expected pending name and atomically grants its membership.
     #[datastore_span(name = "approve_dntls_application", system = "postgresql")]
     pub async fn approve_dntls_application(
         &self,
         community: CommunityId,
         pubkey: &str,
+        fqdn: &str,
         approved_by: &str,
-    ) -> Result<Option<DntlsApplication>> {
-        approve_application(&self.pool, community, pubkey, approved_by).await
+        is_admin: bool,
+    ) -> Result<Option<(DntlsApplication, bool)>> {
+        approve_application(&self.pool, community, pubkey, fqdn, approved_by, is_admin).await
     }
 
     /// Deletes a pending DNTLS application.
@@ -771,6 +794,165 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn dntls_manual_approval_cannot_grant_admin_after_rebinding() {
+        let (db, community) = test_db().await;
+        let first = "aa".repeat(32);
+        let second = "bb".repeat(32);
+        db.upsert_dntls_pending_application(community, &first, "admin.example")
+            .await
+            .expect("pending admin");
+        db.add_relay_member(community, &first, "member", None)
+            .await
+            .expect("member");
+        let (approved, changed) = db
+            .approve_dntls_application(community, &first, "admin.example", &second, true)
+            .await
+            .expect("approve")
+            .expect("pending row");
+        assert_eq!(approved.status, "approved");
+        assert!(changed);
+        assert_eq!(
+            role_of(&db, community, &first).await.as_deref(),
+            Some("admin")
+        );
+        db.upsert_dntls_approved_application(community, &second, "admin.example", &second, true)
+            .await
+            .expect("rebind");
+        assert!(db
+            .approve_dntls_application(community, &first, "admin.example", &second, true,)
+            .await
+            .expect("stale approval")
+            .is_none());
+        assert_eq!(
+            role_of(&db, community, &first).await.as_deref(),
+            Some("member")
+        );
+        assert_eq!(
+            role_of(&db, community, &second).await.as_deref(),
+            Some("admin")
+        );
+
+        // A refreshed pending application cannot inherit an old name's privilege.
+        db.upsert_dntls_pending_application(community, &first, "ordinary.example")
+            .await
+            .expect("changed pending name");
+        assert!(db
+            .approve_dntls_application(community, &first, "admin.example", &second, true,)
+            .await
+            .expect("stale name approval")
+            .is_none());
+        assert_eq!(
+            role_of(&db, community, &first).await.as_deref(),
+            Some("member")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_pending_name_move_cannot_demote_another_names_admin() {
+        async fn wait_for_waiters(pool: &PgPool, blocker: i32, expected: i64) {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let count: i64 = sqlx::query_scalar(
+                        "WITH RECURSIVE waiting(pid) AS ( \
+                         SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) \
+                         UNION SELECT a.pid FROM pg_stat_activity a JOIN waiting w \
+                         ON w.pid = ANY(pg_blocking_pids(a.pid))) \
+                         SELECT count(*) FROM waiting",
+                    )
+                    .bind(blocker)
+                    .fetch_one(pool)
+                    .await
+                    .expect("waiting queries");
+                    if count >= expected {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("admission queries reached the held row");
+        }
+
+        let (db, community) = test_db().await;
+        let moving = "aa".repeat(32);
+        let replacing = "bb".repeat(32);
+        db.upsert_dntls_pending_application(community, &moving, "old.example")
+            .await
+            .expect("pending name");
+        let mut blocker = db.pool.begin().await.expect("blocker");
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("blocker pid");
+        sqlx::query("SELECT 1 FROM dntls_applications WHERE community_id = $1 FOR UPDATE")
+            .bind(community.as_uuid())
+            .execute(&mut *blocker)
+            .await
+            .expect("hold pending row");
+        let moving_db = db.clone();
+        let moving_key = moving.clone();
+        let move_name = tokio::spawn(async move {
+            moving_db
+                .upsert_dntls_approved_application(
+                    community,
+                    &moving_key,
+                    "new.example",
+                    &moving_key,
+                    true,
+                )
+                .await
+        });
+        wait_for_waiters(&db.pool, blocker_pid, 1).await;
+        let replacing_db = db.clone();
+        let replacing_key = replacing.clone();
+        let replace_name = tokio::spawn(async move {
+            replacing_db
+                .upsert_dntls_approved_application(
+                    community,
+                    &replacing_key,
+                    "old.example",
+                    &replacing_key,
+                    true,
+                )
+                .await
+        });
+        wait_for_waiters(&db.pool, blocker_pid, 2).await;
+        blocker.rollback().await.expect("release pending row");
+        assert_eq!(
+            move_name.await.expect("move task").expect("move name"),
+            bound(None, true)
+        );
+        assert_eq!(
+            replace_name
+                .await
+                .expect("replace task")
+                .expect("replace name"),
+            bound(None, true)
+        );
+        for key in [&moving, &replacing] {
+            assert_eq!(role_of(&db, community, key).await.as_deref(), Some("admin"));
+        }
+        assert_eq!(
+            db.get_dntls_application(community, &moving)
+                .await
+                .expect("moving mapping")
+                .expect("approved")
+                .fqdn,
+            "new.example"
+        );
+        assert_eq!(
+            db.get_dntls_application(community, &replacing)
+                .await
+                .expect("replacing mapping")
+                .expect("approved")
+                .fqdn,
+            "old.example"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn dntls_concurrent_admin_rebinding_serializes_roles() {
         let (db, community) = test_db().await;
         let first = "aa".repeat(32);
@@ -825,6 +1007,8 @@ mod tests {
             Some("member")
         );
 
+        let second = "dd".repeat(32);
+        let third = "ee".repeat(32);
         assert_eq!(
             db.upsert_dntls_approved_application(community, &first, "bob.example", &first, true)
                 .await

@@ -123,6 +123,7 @@ async fn authenticate(
         require_payload,
     )?;
     super::bridge::check_nip98_replay(state, &tenant, event_id_bytes).await?;
+    apply_http_admission(state, &tenant, headers, &pubkey.to_hex()).await?;
     Ok((tenant, pubkey))
 }
 
@@ -158,23 +159,12 @@ async fn admit_as_member(
     pubkey_hex: &str,
     fqdn: &str,
 ) -> Result<(), String> {
-    let is_admin = state.config.dntls_admins.iter().any(|name| name == fqdn);
-    let role = if is_admin { "admin" } else { "member" };
     let was_inserted = state
         .db
-        .claim_relay_membership(tenant.community(), pubkey_hex, role, None)
+        .claim_relay_membership(tenant.community(), pubkey_hex, "member", None)
         .await
         .map_err(|e| format!("dntls membership: {e}"))?;
-    let promoted = if is_admin && !was_inserted {
-        state
-            .db
-            .update_relay_member_role(tenant.community(), pubkey_hex, "admin")
-            .await
-            .map_err(|e| format!("dntls admin promotion: {e}"))?
-    } else {
-        false
-    };
-    if was_inserted || promoted {
+    if was_inserted {
         tracing::info!(
             community = %tenant.community(),
             member = %pubkey_hex,
@@ -375,16 +365,27 @@ pub async fn approve(
         ));
     };
 
-    admit_as_member(&state, &tenant, &target, &existing.fqdn)
-        .await
-        .map_err(|e| super::internal_error(&e))?;
-
-    let approved = state
+    let is_admin = state.config.dntls_admins.contains(&existing.fqdn);
+    let (approved, membership_changed) = state
         .db
-        .approve_dntls_application(tenant.community(), &target, &pubkey.to_hex())
+        .approve_dntls_application(
+            tenant.community(),
+            &target,
+            &existing.fqdn,
+            &pubkey.to_hex(),
+            is_admin,
+        )
         .await
         .map_err(|e| super::internal_error(&format!("dntls approve persist: {e}")))?
         .ok_or_else(|| super::api_error(StatusCode::NOT_FOUND, "application_not_found"))?;
+    if membership_changed {
+        if let Err(e) = publish_nip43_member_added(&tenant, &state, &target).await {
+            tracing::warn!("failed to publish NIP-43 member-added delta after DNTLS approve: {e}");
+        }
+        if let Err(e) = publish_nip43_membership_list(&tenant, &state).await {
+            tracing::warn!("failed to publish NIP-43 membership list after DNTLS approve: {e}");
+        }
+    }
 
     Ok(Json(serde_json::json!({
         "status": "approved",
@@ -818,9 +819,7 @@ mod tests {
             let mut state = dntls_test_state_on(&host, mode, TEST_REDIS_URL)
                 .await
                 .expect("requires reachable Postgres, Redis, and relay test state");
-            Arc::get_mut(&mut state)
-                .expect("unique state")
-                .config
+            Arc::make_mut(&mut Arc::get_mut(&mut state).expect("unique state").config)
                 .dntls_admins = vec!["josh.dntls".to_string()];
             let admin = Keys::generate();
             let newcomer = Keys::generate();
@@ -917,9 +916,7 @@ mod tests {
             let mut state = dntls_test_state_on(&host, DntlsAdmission::Approve, TEST_REDIS_URL)
                 .await
                 .expect("requires reachable Postgres, Redis, and relay test state");
-            Arc::get_mut(&mut state)
-                .expect("unique state")
-                .config
+            Arc::make_mut(&mut Arc::get_mut(&mut state).expect("unique state").config)
                 .dntls_admins = vec!["josh.dntls".to_string()];
             let keys = Keys::generate();
             let hex = keys.public_key().to_hex();
@@ -999,9 +996,7 @@ mod tests {
             let mut state = dntls_test_state_on(&host, mode, TEST_REDIS_URL)
                 .await
                 .expect("requires reachable Postgres, Redis, and relay test state");
-            Arc::get_mut(&mut state)
-                .expect("unique state")
-                .config
+            Arc::make_mut(&mut Arc::get_mut(&mut state).expect("unique state").config)
                 .dntls_admins = vec!["josh.dntls".to_string()];
             let first = Keys::generate();
             let second = Keys::generate();

@@ -221,8 +221,7 @@ pub async fn claim_relay_membership(
     policy_version: Option<&str>,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
-    let inserted =
-        insert_relay_member_on(&mut *tx, community, pubkey, role, Some("invite")).await?;
+    let inserted = insert_relay_member_on(&mut tx, community, pubkey, role, Some("invite")).await?;
 
     if let Some(version) = policy_version {
         sqlx::query(
