@@ -144,6 +144,70 @@ pub async fn add_relay_member(
     Ok(result.rows_affected() > 0)
 }
 
+/// Inserts a relay member on an existing connection.
+///
+/// Returns `true` if the row was inserted, `false` if the pubkey already
+/// belonged to this community. Existing roles are left unchanged.
+pub(crate) async fn insert_relay_member_on(
+    conn: &mut sqlx::PgConnection,
+    community: CommunityId,
+    pubkey: &str,
+    role: &str,
+    added_by: Option<&str>,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
+         VALUES ($1, $2, $3, $4) ON CONFLICT (community_id, pubkey) DO NOTHING",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(role)
+    .bind(added_by)
+    .execute(conn)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Inserts `admin` or promotes `member` to `admin` on this connection.
+///
+/// Leaves `owner` and existing `admin` rows unchanged. Returns whether an
+/// insert or a member→admin promotion happened.
+pub(crate) async fn grant_relay_admin_on(
+    conn: &mut sqlx::PgConnection,
+    community: CommunityId,
+    pubkey: &str,
+) -> Result<bool> {
+    if insert_relay_member_on(conn, community, pubkey, "admin", Some("invite")).await? {
+        return Ok(true);
+    }
+    let result = sqlx::query(
+        "UPDATE relay_members SET role = 'admin', updated_at = now() \
+         WHERE community_id = $1 AND pubkey = $2 AND role = 'member'",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .execute(conn)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Demotes `admin` to `member` on this connection. Never touches `owner`.
+pub(crate) async fn demote_relay_admin_to_member_on(
+    conn: &mut sqlx::PgConnection,
+    community: CommunityId,
+    pubkey: &str,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE relay_members SET role = 'member', updated_at = now() \
+         WHERE community_id = $1 AND pubkey = $2 AND role = 'admin'",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .execute(conn)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// Claims relay membership via an invite and atomically persists policy evidence.
 ///
 /// Returns `true` when membership was inserted, or `false` when the pubkey was
@@ -157,18 +221,7 @@ pub async fn claim_relay_membership(
     policy_version: Option<&str>,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
-    let inserted = sqlx::query(
-        "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
-         VALUES ($1, $2, $3, 'invite') \
-         ON CONFLICT (community_id, pubkey) DO NOTHING",
-    )
-    .bind(community.as_uuid())
-    .bind(pubkey)
-    .bind(role)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected()
-        > 0;
+    let inserted = insert_relay_member_on(&mut tx, community, pubkey, role, Some("invite")).await?;
 
     if let Some(version) = policy_version {
         sqlx::query(

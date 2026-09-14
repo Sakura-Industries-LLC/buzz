@@ -7,11 +7,11 @@
 //! [`crate::config::DntlsAdmission`] is not `Off`.
 //!
 //! In `auto` mode the latest verified caller can replace the name's previous
-//! key. The new key follows normal membership admission and NIP-43 publication;
-//! the old key loses the name mapping but retains its membership and roles.
-//! A key already approved for another name cannot take a second mapping.
-//! In `approve` mode connections cannot replace another key's pending or
-//! approved mapping.
+//! key. Listed `BUZZ_DNTLS_ADMINS` names also take this path in `approve` mode:
+//! their admin role follows the binding, while displaced keys retain ordinary
+//! membership and owners keep their role. Unlisted names retain their existing
+//! roles on rebind. A key already approved for another name cannot take a second
+//! mapping. Other `approve` connections cannot replace another key's mapping.
 //!
 //! HTTP routes (all NIP-98 signed, outside the Nostr event data plane):
 //!
@@ -123,6 +123,7 @@ async fn authenticate(
         require_payload,
     )?;
     super::bridge::check_nip98_replay(state, &tenant, event_id_bytes).await?;
+    apply_http_admission(state, &tenant, headers, &pubkey.to_hex()).await?;
     Ok((tenant, pubkey))
 }
 
@@ -189,9 +190,10 @@ pub(crate) async fn apply_connection_admission(
 ) -> Result<AdmissionEffect, String> {
     let fqdn = fqdn.trim().to_ascii_lowercase();
     let fqdn = fqdn.as_str();
+    let is_admin = state.config.dntls_admins.iter().any(|name| name == fqdn);
     match state.config.dntls_admission {
         DntlsAdmission::Off => Ok(AdmissionEffect::Applied),
-        DntlsAdmission::Approve => {
+        DntlsAdmission::Approve if !is_admin => {
             match state
                 .db
                 .upsert_dntls_pending_application(tenant.community(), pubkey_hex, fqdn)
@@ -199,25 +201,54 @@ pub(crate) async fn apply_connection_admission(
                 .map_err(|e| format!("dntls pending upsert: {e}"))?
             {
                 buzz_db::dntls::UpsertJoinOutcome::Pending
-                | buzz_db::dntls::UpsertJoinOutcome::Bound => Ok(AdmissionEffect::Applied),
+                | buzz_db::dntls::UpsertJoinOutcome::Bound { .. } => Ok(AdmissionEffect::Applied),
                 buzz_db::dntls::UpsertJoinOutcome::NameAlreadyClaimed => {
                     Ok(AdmissionEffect::NameClaimed)
                 }
             }
         }
-        DntlsAdmission::Auto => {
+        DntlsAdmission::Auto | DntlsAdmission::Approve => {
             match state
                 .db
-                .upsert_dntls_approved_application(tenant.community(), pubkey_hex, fqdn, pubkey_hex)
+                .upsert_dntls_approved_application(
+                    tenant.community(),
+                    pubkey_hex,
+                    fqdn,
+                    pubkey_hex,
+                    is_admin,
+                )
                 .await
                 .map_err(|e| format!("dntls approved upsert: {e}"))?
             {
                 buzz_db::dntls::UpsertJoinOutcome::NameAlreadyClaimed => {
                     Ok(AdmissionEffect::NameClaimed)
                 }
-                buzz_db::dntls::UpsertJoinOutcome::Pending
-                | buzz_db::dntls::UpsertJoinOutcome::Bound => {
-                    admit_as_member(state, tenant, pubkey_hex, fqdn).await?;
+                buzz_db::dntls::UpsertJoinOutcome::Pending => {
+                    Err("dntls approved upsert returned a pending application".to_string())
+                }
+                buzz_db::dntls::UpsertJoinOutcome::Bound {
+                    displaced,
+                    membership_changed,
+                } => {
+                    if is_admin {
+                        // Admin roles were committed with the binding. Granting them
+                        // here could resurrect an admin displaced by a newer AUTH.
+                        if membership_changed {
+                            if let Err(e) =
+                                publish_nip43_member_added(tenant, state, pubkey_hex).await
+                            {
+                                tracing::warn!("failed to publish NIP-43 member-added delta after DNTLS admit: {e}");
+                            }
+                        }
+                        if membership_changed || displaced.is_some() {
+                            // One snapshot announces both the new admin and displaced member.
+                            if let Err(e) = publish_nip43_membership_list(tenant, state).await {
+                                tracing::warn!("failed to publish NIP-43 membership list after DNTLS admit: {e}");
+                            }
+                        }
+                    } else {
+                        admit_as_member(state, tenant, pubkey_hex, fqdn).await?;
+                    }
                     Ok(AdmissionEffect::Applied)
                 }
             }
@@ -334,16 +365,27 @@ pub async fn approve(
         ));
     };
 
-    admit_as_member(&state, &tenant, &target, &existing.fqdn)
-        .await
-        .map_err(|e| super::internal_error(&e))?;
-
-    let approved = state
+    let is_admin = state.config.dntls_admins.contains(&existing.fqdn);
+    let (approved, membership_changed) = state
         .db
-        .approve_dntls_application(tenant.community(), &target, &pubkey.to_hex())
+        .approve_dntls_application(
+            tenant.community(),
+            &target,
+            &existing.fqdn,
+            &pubkey.to_hex(),
+            is_admin,
+        )
         .await
         .map_err(|e| super::internal_error(&format!("dntls approve persist: {e}")))?
         .ok_or_else(|| super::api_error(StatusCode::NOT_FOUND, "application_not_found"))?;
+    if membership_changed {
+        if let Err(e) = publish_nip43_member_added(&tenant, &state, &target).await {
+            tracing::warn!("failed to publish NIP-43 member-added delta after DNTLS approve: {e}");
+        }
+        if let Err(e) = publish_nip43_membership_list(&tenant, &state).await {
+            tracing::warn!("failed to publish NIP-43 membership list after DNTLS approve: {e}");
+        }
+    }
 
     Ok(Json(serde_json::json!({
         "status": "approved",
@@ -765,6 +807,301 @@ mod tests {
                 json.get("error").and_then(Value::as_str),
                 Some("dntls_not_configured"),
                 "{path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_listed_admin_bypasses_approval_but_other_names_do_not() {
+        for mode in [DntlsAdmission::Approve, DntlsAdmission::Auto] {
+            let host = format!("dntls-admin-{}.example", Uuid::new_v4().simple());
+            let mut state = dntls_test_state_on(&host, mode, TEST_REDIS_URL)
+                .await
+                .expect("requires reachable Postgres, Redis, and relay test state");
+            Arc::make_mut(&mut Arc::get_mut(&mut state).expect("unique state").config)
+                .dntls_admins = vec!["josh.dntls".to_string()];
+            let admin = Keys::generate();
+            let newcomer = Keys::generate();
+            let (ok, messages) =
+                auth_connection(state.clone(), &host, &admin, Some(" Josh.DNTLS ")).await;
+            assert!(ok, "listed admin AUTH: {messages:?}");
+            let response = send(
+                state.clone(),
+                &host,
+                Method::GET,
+                PENDING_PATH,
+                &admin,
+                String::new(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                read_json(response).await["applications"],
+                serde_json::json!([])
+            );
+
+            let (ok, _) =
+                auth_connection(state.clone(), &host, &newcomer, Some("newcomer.dntls")).await;
+            assert_eq!(ok, mode == DntlsAdmission::Auto);
+            let community = state
+                .db
+                .lookup_community_by_host(&host)
+                .await
+                .expect("lookup")
+                .expect("community");
+            let members = state
+                .db
+                .list_relay_members(community.id)
+                .await
+                .expect("members");
+            assert_eq!(
+                members
+                    .iter()
+                    .find(|m| m.pubkey == admin.public_key().to_hex())
+                    .expect("admin member")
+                    .role,
+                "admin"
+            );
+            let newcomer_member = members
+                .iter()
+                .find(|m| m.pubkey == newcomer.public_key().to_hex());
+            if mode == DntlsAdmission::Auto {
+                assert_eq!(newcomer_member.expect("ordinary member").role, "member");
+            } else {
+                assert!(newcomer_member.is_none());
+                let response = send(
+                    state.clone(),
+                    &host,
+                    Method::GET,
+                    PENDING_PATH,
+                    &admin,
+                    String::new(),
+                )
+                .await;
+                let json = read_json(response).await;
+                assert_eq!(json["applications"][0]["fqdn"], "newcomer.dntls");
+                assert_eq!(
+                    json["applications"][0]["pubkey"],
+                    newcomer.public_key().to_hex()
+                );
+            }
+
+            // Exact names only: a subname does not inherit the configured role.
+            let subname = Keys::generate();
+            let (ok, _) =
+                auth_connection(state.clone(), &host, &subname, Some("buzz.josh.dntls")).await;
+            assert_eq!(ok, mode == DntlsAdmission::Auto);
+            let member = state
+                .db
+                .get_relay_member(community.id, &subname.public_key().to_hex())
+                .await
+                .expect("subname membership");
+            assert_eq!(
+                member.map(|m| m.role).as_deref(),
+                if mode == DntlsAdmission::Auto {
+                    Some("member")
+                } else {
+                    None
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_listed_admin_promotes_member_and_preserves_owner() {
+        for initial_role in ["member", "owner"] {
+            let host = format!("dntls-promote-{}.example", Uuid::new_v4().simple());
+            let mut state = dntls_test_state_on(&host, DntlsAdmission::Approve, TEST_REDIS_URL)
+                .await
+                .expect("requires reachable Postgres, Redis, and relay test state");
+            Arc::make_mut(&mut Arc::get_mut(&mut state).expect("unique state").config)
+                .dntls_admins = vec!["josh.dntls".to_string()];
+            let keys = Keys::generate();
+            let hex = keys.public_key().to_hex();
+            let community = state
+                .db
+                .lookup_community_by_host(&host)
+                .await
+                .expect("lookup")
+                .expect("community");
+            state
+                .db
+                .add_relay_member(community.id, &hex, initial_role, None)
+                .await
+                .expect("seed member");
+            // Also cover a previously queued application when the allowlist changes.
+            state
+                .db
+                .upsert_dntls_pending_application(community.id, &hex, "josh.dntls")
+                .await
+                .expect("seed pending");
+            let response = send_with_dntls(
+                state.clone(),
+                &host,
+                Method::GET,
+                PENDING_PATH,
+                &keys,
+                String::new(),
+                Some("josh.dntls"),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "NIP-98 admission");
+            assert_eq!(
+                read_json(response).await["applications"],
+                serde_json::json!([])
+            );
+            let expected_role = if initial_role == "owner" {
+                "owner"
+            } else {
+                "admin"
+            };
+            assert_eq!(
+                state
+                    .db
+                    .get_relay_member(community.id, &hex)
+                    .await
+                    .expect("lookup")
+                    .expect("member")
+                    .role,
+                expected_role
+            );
+
+            // Removing configuration is not a revocation operation.
+            let state = dntls_test_state_on(&host, DntlsAdmission::Approve, TEST_REDIS_URL)
+                .await
+                .expect("reopen community without configured admins");
+            let (ok, messages) =
+                auth_connection(state.clone(), &host, &keys, Some("josh.dntls")).await;
+            assert!(ok, "existing member AUTH: {messages:?}");
+            assert_eq!(
+                state
+                    .db
+                    .get_relay_member(community.id, &hex)
+                    .await
+                    .expect("lookup")
+                    .expect("member")
+                    .role,
+                expected_role
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_admin_rebinding_transfers_role_and_publishes_both_members() {
+        for mode in [DntlsAdmission::Approve, DntlsAdmission::Auto] {
+            let host = format!("dntls-admin-rebind-{}.example", Uuid::new_v4().simple());
+            let mut state = dntls_test_state_on(&host, mode, TEST_REDIS_URL)
+                .await
+                .expect("requires reachable Postgres, Redis, and relay test state");
+            Arc::make_mut(&mut Arc::get_mut(&mut state).expect("unique state").config)
+                .dntls_admins = vec!["josh.dntls".to_string()];
+            let first = Keys::generate();
+            let second = Keys::generate();
+            for keys in [&first, &second] {
+                let (ok, messages) =
+                    auth_connection(state.clone(), &host, keys, Some("josh.dntls")).await;
+                assert!(ok, "admin AUTH: {messages:?}");
+            }
+            let community = state
+                .db
+                .lookup_community_by_host(&host)
+                .await
+                .expect("lookup")
+                .expect("community");
+            for (keys, role) in [(&first, "member"), (&second, "admin")] {
+                assert_eq!(
+                    state
+                        .db
+                        .get_relay_member(community.id, &keys.public_key().to_hex(),)
+                        .await
+                        .expect("lookup")
+                        .expect("member")
+                        .role,
+                    role
+                );
+            }
+            let response = send(
+                state.clone(),
+                &host,
+                Method::GET,
+                PENDING_PATH,
+                &first,
+                String::new(),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "old key loses admin API access"
+            );
+            let response = send(
+                state.clone(),
+                &host,
+                Method::GET,
+                NAMES_PATH,
+                &second,
+                String::new(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let json = read_json(response).await;
+            assert_eq!(json["names"].as_array().expect("names").len(), 1);
+            assert_eq!(json["names"][0]["pubkey"], second.public_key().to_hex());
+            assert_eq!(json["names"][0]["fqdn"], "josh.dntls");
+
+            let response = send(
+                state.clone(),
+                &host,
+                Method::POST,
+                "/query",
+                &second,
+                r#"[{"kinds":[13534]}]"#.to_string(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let events = read_json(response).await;
+            let snapshot = events
+                .as_array()
+                .expect("events")
+                .iter()
+                .find(|event| event["kind"] == 13534)
+                .expect("membership snapshot");
+            for (keys, role) in [(&first, "member"), (&second, "admin")] {
+                assert!(
+                    snapshot["tags"]
+                        .as_array()
+                        .expect("tags")
+                        .iter()
+                        .any(|tag| {
+                            tag[0] == "member"
+                                && tag[1] == keys.public_key().to_hex()
+                                && tag[2] == role
+                        }),
+                    "snapshot missing {role}: {snapshot}"
+                );
+            }
+            // Owner bootstrap remains authoritative even when its name is displaced.
+            state
+                .db
+                .bootstrap_owner(community.id, &second.public_key().to_hex())
+                .await
+                .expect("bootstrap owner");
+            let third = Keys::generate();
+            let (ok, messages) =
+                auth_connection(state.clone(), &host, &third, Some("josh.dntls")).await;
+            assert!(ok, "new key AUTH: {messages:?}");
+            assert_eq!(
+                state
+                    .db
+                    .get_relay_member(community.id, &second.public_key().to_hex(),)
+                    .await
+                    .expect("lookup")
+                    .expect("owner")
+                    .role,
+                "owner"
             );
         }
     }

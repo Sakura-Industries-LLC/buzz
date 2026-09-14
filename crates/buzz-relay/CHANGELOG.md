@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Add `BUZZ_DNTLS_ADMINS` for exact-name administrators in `auto` and `approve`
+  admission modes. Admin roles follow verified name rebinding atomically;
+  owners retain their role. Removing a configured name does not revoke an
+  existing role.
+- Apply verified-name admission on the DNTLS HTTP routes and keep manual
+  approval atomic with its membership grant.
+
 ## relay-v0.2.2
 
 First versioned relay image for the Sakura DNTLS fork; previous fork builds
