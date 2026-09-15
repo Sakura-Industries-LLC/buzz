@@ -11,8 +11,9 @@
 //! their admin role follows the binding, while displaced keys retain ordinary
 //! membership and owners keep their role. Unlisted names retain their existing
 //! roles on rebind. A key already approved for another name cannot take a second
-//! mapping. Other `approve` connections cannot replace a pending or approved
-//! mapping, but a newly verified key may replace a rejected mapping.
+//! mapping. Other `approve` connections replace pending bindings and inherit
+//! approval of an approved name, removing the displaced key's membership unless
+//! it is an owner. A newly verified key may replace a rejected mapping.
 //!
 //! HTTP routes (all NIP-98 signed, outside the Nostr event data plane):
 //!
@@ -40,7 +41,9 @@ use serde_json::Value;
 
 use crate::config::DntlsAdmission;
 use crate::connection::ConnectionState;
-use crate::handlers::side_effects::{publish_nip43_member_added, publish_nip43_membership_list};
+use crate::handlers::side_effects::{
+    publish_nip43_member_added, publish_nip43_member_removed, publish_nip43_membership_list,
+};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 use buzz_core::tenant::TenantContext;
@@ -209,8 +212,37 @@ pub(crate) async fn apply_connection_admission(
                 .map_err(|e| format!("dntls pending upsert: {e}"))?
             {
                 buzz_db::dntls::UpsertJoinOutcome::Pending
-                | buzz_db::dntls::UpsertJoinOutcome::Rejected
-                | buzz_db::dntls::UpsertJoinOutcome::Bound { .. } => Ok(AdmissionEffect::Applied),
+                | buzz_db::dntls::UpsertJoinOutcome::Rejected => Ok(AdmissionEffect::Applied),
+                buzz_db::dntls::UpsertJoinOutcome::Bound {
+                    displaced,
+                    membership_changed,
+                } => {
+                    // Both memberships were committed with the binding; do not
+                    // reinsert a key that a newer verified caller may displace.
+                    if membership_changed {
+                        if let Err(e) = publish_nip43_member_added(tenant, state, pubkey_hex).await {
+                            tracing::warn!("failed to publish NIP-43 member-added delta after DNTLS rebind: {e}");
+                        }
+                    }
+                    if let Some(old) = displaced.as_deref() {
+                        let retained = state
+                            .db
+                            .is_relay_member(tenant.community(), old)
+                            .await
+                            .map_err(|e| format!("dntls displaced membership: {e}"))?;
+                        if !retained {
+                            if let Err(e) = publish_nip43_member_removed(tenant, state, old).await {
+                                tracing::warn!("failed to publish NIP-43 member-removed delta after DNTLS rebind: {e}");
+                            }
+                        }
+                    }
+                    if membership_changed || displaced.is_some() {
+                        if let Err(e) = publish_nip43_membership_list(tenant, state).await {
+                            tracing::warn!("failed to publish NIP-43 membership list after DNTLS rebind: {e}");
+                        }
+                    }
+                    Ok(AdmissionEffect::Applied)
+                }
                 buzz_db::dntls::UpsertJoinOutcome::NameAlreadyClaimed => {
                     Ok(AdmissionEffect::NameClaimed)
                 }
@@ -1388,6 +1420,88 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn dntls_approve_rebinds_approved_name_without_another_approval() {
+        let host = format!("dntls-approved-rebind-{}.example", Uuid::new_v4().simple());
+        let owner = Keys::generate();
+        let first = Keys::generate();
+        let second = Keys::generate();
+        let third = Keys::generate();
+        let state = dntls_test_state_on(&host, DntlsAdmission::Approve, TEST_REDIS_URL)
+            .await
+            .expect("requires reachable Postgres, Redis, and relay test state");
+        let community = state.db.lookup_community_by_host(&host).await.unwrap().unwrap();
+        state.db.add_relay_member(
+            community.id, &owner.public_key().to_hex(), "owner", None,
+        ).await.unwrap();
+        let (ok, messages) =
+            auth_connection(state.clone(), &host, &first, Some("shared.example")).await;
+        assert!(!ok, "{messages:?}");
+        assert!(messages.iter().any(|msg| msg.contains(AUTH_APPROVAL_PENDING)));
+        let response = send(
+            state.clone(), &host, Method::POST, APPROVE_PATH, &owner,
+            serde_json::json!({ "pubkey": first.public_key().to_hex() }).to_string(),
+        ).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let (ok, messages) =
+            auth_connection(state.clone(), &host, &second, Some("shared.example")).await;
+        assert!(ok, "reinstalled caller is already approved: {messages:?}");
+        assert!(messages.iter().all(|msg| !msg.contains(NAME_ALREADY_CLAIMED_NOTICE)));
+        let (ok, messages) = auth_connection(state.clone(), &host, &first, None).await;
+        assert!(!ok, "the displaced key must lose admission");
+        assert!(messages.iter().any(|msg| msg.contains("restricted: not a relay member")));
+        let response = send(
+            state.clone(), &host, Method::GET, NAMES_PATH, &second, String::new(),
+        ).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let names = read_json(response).await;
+        assert_eq!(names["names"].as_array().unwrap().len(), 1);
+        assert_eq!(names["names"][0]["pubkey"], second.public_key().to_hex());
+        assert_eq!(names["names"][0]["fqdn"], "shared.example");
+
+        let response = send(
+            state.clone(), &host, Method::POST, "/query", &second,
+            r#"[{"kinds":[8000,8001,13534]}]"#.to_string(),
+        ).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let events = read_json(response).await;
+        let events = events.as_array().unwrap();
+        for (kind, pubkey) in [
+            (8000, second.public_key().to_hex()),
+            (8001, first.public_key().to_hex()),
+        ] {
+            assert!(events.iter().any(|event| {
+                event["kind"] == kind && event["tags"].as_array().unwrap().iter()
+                    .any(|tag| tag[0] == "p" && tag[1] == pubkey)
+            }), "missing delta kind {kind}: {events:?}");
+        }
+        let snapshots: Vec<_> = events.iter().filter(|event| event["kind"] == 13534).collect();
+        assert_eq!(snapshots.len(), 1, "one authoritative membership snapshot");
+        let members: Vec<_> = snapshots[0]["tags"].as_array().unwrap().iter()
+            .filter(|tag| tag[0] == "member").map(|tag| tag[1].as_str().unwrap()).collect();
+        assert!(members.contains(&second.public_key().to_hex().as_str()));
+        assert!(members.contains(&owner.public_key().to_hex().as_str()));
+        assert!(!members.contains(&first.public_key().to_hex().as_str()));
+
+        // NIP-98 follows the same transition, without a preceding WebSocket AUTH.
+        let response = send_with_dntls(
+            state.clone(), &host, Method::POST, "/query", &third,
+            "[]".to_string(), Some("shared.example"),
+        ).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = send(
+            state.clone(), &host, Method::GET, NAMES_PATH, &third, String::new(),
+        ).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(read_json(response).await["names"][0]["pubkey"], third.public_key().to_hex());
+        let response = send(
+            state, &host, Method::POST, "/query", &second, "[]".to_string(),
+        ).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn dntls_missing_header_is_ordinary_auth() {
         let host = format!("dntls-plain-{}.example", Uuid::new_v4().simple());
@@ -1808,19 +1922,21 @@ mod tests {
             "{messages:?}"
         );
 
-        let (ok, messages) = auth_connection(state, &host, &other, Some("alice.example")).await;
+        let (ok, messages) = auth_connection(state.clone(), &host, &other, Some("alice.example")).await;
+        assert!(!ok, "{messages:?}");
+        assert!(
+            messages
+                .iter()
+                .any(|msg| msg.contains(AUTH_APPROVAL_PENDING)),
+            "{messages:?}"
+        );
+        let (ok, messages) = auth_connection(state, &host, &joiner, None).await;
         assert!(!ok, "{messages:?}");
         assert!(
             messages
                 .iter()
                 .any(|msg| msg.contains("restricted: not a relay member")),
-            "{messages:?}"
-        );
-        assert!(
-            messages
-                .iter()
-                .all(|msg| !msg.contains(AUTH_APPROVAL_PENDING)),
-            "{messages:?}"
+            "the displaced key is no longer pending: {messages:?}"
         );
     }
 
@@ -1917,7 +2033,7 @@ mod tests {
                 .await
                 .get("error")
                 .and_then(Value::as_str),
-            Some("relay_membership_required")
+            Some(HTTP_APPROVAL_PENDING)
         );
     }
 
