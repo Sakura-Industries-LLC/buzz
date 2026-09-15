@@ -173,6 +173,7 @@ export default defineConfig({
         "**/agents.spec.ts",
         "**/agent-snapshot-recipient.spec.ts",
         "**/onboarding.spec.ts",
+        "**/dntls-onboarding-approval.spec.ts",
         "**/stream.spec.ts",
         "**/integration.spec.ts",
         "**/dntls-badge.spec.ts",

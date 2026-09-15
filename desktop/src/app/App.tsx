@@ -68,6 +68,7 @@ import { hydrateChannelHeads } from "@/features/messages/lib/channelHeadCache";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
 import { getProfile } from "@/shared/api/tauriProfiles";
+import { relayClient } from "@/shared/api/relayClient";
 import {
   type AddCommunityDeepLinkPayload,
   listenForDeepLinks,
@@ -538,12 +539,35 @@ function CommunityApp({
     if (transaction?.stage !== "connecting" || !targetIsReady) return;
     const transactionId = transaction.id;
     const relayUrl = transaction.relayUrl;
+    if (transaction.error) {
+      // The approval screen retries membership gates; other failures use Retry.
+      // Clearing the error must be able to re-run AUTH then profile.
+      profileCheckTransactionRef.current = null;
+      return;
+    }
     if (profileCheckTransactionRef.current === transactionId) return;
     profileCheckTransactionRef.current = transactionId;
 
-    // resolveProfileCheckAction resolves exactly once (Promise.race + timer
-    // cleared on settle), so no settled flag is needed here.
-    void resolveProfileCheckAction(getProfile, 10_000).then((result) => {
+    void (async () => {
+      try {
+        await relayClient.preconnect();
+      } catch (error) {
+        if (
+          !isTransactionStillConnecting(transactionRef.current, transactionId)
+        ) {
+          return;
+        }
+        communityOnboarding.update(
+          { error: error instanceof Error ? error.message : String(error) },
+          transactionId,
+        );
+        return;
+      }
+
+      if (!isTransactionStillConnecting(transactionRef.current, transactionId))
+        return;
+
+      const result = await resolveProfileCheckAction(getProfile, 10_000);
       // Atomic staleness guard via isTransactionStillConnecting: the
       // transaction must still be the same one that launched this request
       // AND still be in connecting. Covers cancel+replacement (B's ID !== A's)
@@ -554,19 +578,22 @@ function CommunityApp({
       if (result.action === "skip") {
         markCommunityOnboardingComplete(result.profile.pubkey, relayUrl);
         communityOnboarding.clear();
+      } else if (result.action === "admission-error") {
+        communityOnboarding.update({ error: result.error }, transactionId);
       } else {
         communityOnboarding.update(
           { stage: "profile", error: undefined },
           transactionId,
         );
       }
-    });
+    })();
   }, [
     communityOnboarding,
     targetIsReady,
     transaction?.stage,
     transaction?.id,
     transaction?.relayUrl,
+    transaction?.error,
   ]);
   // During "entering" the transaction stays alive as a curtain: the app mounts
   // underneath (already pointed at the Welcome channel route) while the

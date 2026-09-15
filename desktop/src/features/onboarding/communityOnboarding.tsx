@@ -4,6 +4,7 @@ import {
 } from "@/features/communities/communityStorage";
 import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
 import type { Profile } from "@/shared/api/types";
+import { membershipGateViewForError } from "@/features/onboarding/membershipGate";
 
 const STORAGE_KEY = "buzz-community-onboarding-transaction.v1";
 
@@ -259,12 +260,15 @@ export function shouldSkipCommunityOnboarding(
  * - `{ action: "skip", profile }` — kind:0 exists; mark complete and enter
  *   the app. The resolved `Profile` is included so callers have the pubkey
  *   for `markCommunityOnboardingComplete` without a second fetch.
- * - `{ action: "show-profile" }` — no kind:0, or the fetch failed / timed
- *   out; show the profile setup step.
+ * - `{ action: "show-profile" }` — no kind:0, or a generic fetch failure /
+ *   timeout; show the profile setup step.
+ * - `{ action: "admission-error", error }` — AUTH or profile membership
+ *   rejection; keep connecting and persist `error` on the transaction.
  */
 export type ProfileCheckAction =
   | { action: "skip"; profile: Profile }
-  | { action: "show-profile" };
+  | { action: "show-profile" }
+  | { action: "admission-error"; error: string };
 
 /**
  * Returns true when a live transaction snapshot still represents the
@@ -289,8 +293,9 @@ export function isTransactionStillConnecting(
  * must return a cancellation handle (like `window.setTimeout`) so the timer
  * can be cleared when the fetch settles before the deadline.
  *
- * Any fetch error or timeout → `{ action: "show-profile" }` (never strands
- * onboarding).
+ * Membership AUTH/HTTP errors are retained as `{ action: "admission-error" }`.
+ * Any other fetch error or timeout → `{ action: "show-profile" }` (never
+ * strands onboarding).
  */
 export async function resolveProfileCheckAction(
   fetchProfile: () => Promise<Profile>,
@@ -315,7 +320,13 @@ export async function resolveProfileCheckAction(
     return shouldSkipCommunityOnboarding(profile)
       ? { action: "skip", profile }
       : { action: "show-profile" };
-  } catch {
+  } catch (error) {
+    if (membershipGateViewForError(error) !== null) {
+      return {
+        action: "admission-error",
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
     return { action: "show-profile" };
   } finally {
     if (timerId !== undefined) clearTimeout(timerId);

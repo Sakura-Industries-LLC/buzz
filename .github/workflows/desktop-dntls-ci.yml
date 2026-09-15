@@ -1,0 +1,56 @@
+# Frontend-only gate; this fork leaves upstream CI disabled.
+name: Desktop dntls CI
+
+on:
+  pull_request:
+    branches: [dntls]
+    paths:
+      - 'desktop/**'
+      - '!desktop/src-tauri/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'patches/**'
+      - '.github/workflows/desktop-dntls-ci.yml'
+
+concurrency:
+  group: desktop-dntls-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  desktop-dntls:
+    name: Desktop dntls Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: Install desktop dependencies
+        run: just desktop-install-ci
+      - name: Desktop lint and format
+        run: just desktop-check
+      - name: Desktop unit tests
+        run: just desktop-test
+      - name: Desktop E2E build
+        run: pnpm -C desktop build:e2e
+      - name: Install Playwright Chromium
+        run: cd desktop && pnpm exec playwright install chromium
+      - name: Install Playwright system dependencies
+        run: cd desktop && pnpm exec playwright install-deps chromium
+      - name: Desktop dntls admission e2e
+        run: cd desktop && pnpm exec playwright test --project=integration tests/e2e/dntls-onboarding-approval.spec.ts
+      - name: Upload desktop dntls e2e artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: desktop-dntls-e2e-artifacts
+          path: |
+            desktop/playwright-report
+            desktop/test-results
+          if-no-files-found: ignore
+          retention-days: 7
