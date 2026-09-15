@@ -5,11 +5,23 @@ import { toast } from "sonner";
 
 import {
   useChangeRelayMemberRoleMutation,
+  useDecideDntlsApplicationMutation,
+  useDntlsPendingApplicationsQuery,
   useMyRelayMembershipLookupQuery,
   useRelayMembersQuery,
   useRemoveRelayMemberMutation,
 } from "@/features/community-members/hooks";
+import {
+  beginDntlsRequestAction,
+  canShowDntlsRequestsSection,
+  dntlsRequestJoinCopy,
+  endDntlsRequestAction,
+  formatDntlsRequestedAt,
+  relayMemberDisplayName,
+} from "@/features/community-members/lib/dntlsRequests";
+import { mergeVerifiedDntlsNames } from "@/features/profile/lib/identity";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
+import { useDntlsNamesQuery } from "@/features/profile/useDntlsNames";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup";
@@ -19,6 +31,7 @@ import type {
   RelayMemberRole,
   UserProfileSummary,
 } from "@/shared/api/types";
+import type { DntlsPendingApplication } from "@/shared/api/dntls";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
@@ -31,16 +44,6 @@ import {
 import { VirtualizedList } from "@/shared/ui/VirtualizedList";
 import { CommunityInviteDialog } from "./CommunityInviteDialog";
 
-function formatDisplayName(member: RelayMember, displayName?: string | null) {
-  const trimmedDisplayName = displayName?.trim();
-  if (
-    trimmedDisplayName &&
-    !trimmedDisplayName.toLowerCase().startsWith("npub1")
-  ) {
-    return trimmedDisplayName;
-  }
-  return member.role === "owner" ? "Community owner" : "Unnamed member";
-}
 
 function npubFromPubkey(pubkey: string): string | null {
   try {
@@ -108,7 +111,7 @@ function RelayMemberRow({
   const canPromote = currentRole === "owner" && member.role === "member";
   const canDemote = currentRole === "owner" && member.role === "admin";
   const hasActions = canRemove || canPromote || canDemote;
-  const displayName = formatDisplayName(member, profile?.displayName);
+  const displayName = relayMemberDisplayName(member, profile);
 
   async function mutateWithToast(
     action: () => Promise<unknown>,
@@ -244,6 +247,63 @@ function RelayMemberRow({
   );
 }
 
+function DntlsRequestRow({
+  application,
+  busy,
+  onApprove,
+  onReject,
+}: {
+  application: DntlsPendingApplication;
+  busy: boolean;
+  onApprove: () => void;
+  onReject: () => void;
+}) {
+  const npub = npubFromPubkey(application.pubkey) ?? application.pubkey;
+  const name = application.fqdn;
+  return (
+    <div
+      aria-label={dntlsRequestJoinCopy(name)}
+      className="group/member flex min-h-14 items-center gap-3 px-1 py-2.5"
+      data-testid={`dntls-request-row-${application.pubkey}`}
+    >
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-medium">{name}</div>
+        <div
+          className="flex items-center gap-1.5 text-xs text-muted-foreground/70"
+          data-settings-subcopy
+        >
+          <span className="truncate font-mono">{truncatePubkey(npub)}</span>
+          <span aria-hidden="true" className="shrink-0">
+            ·
+          </span>
+          <span className="shrink-0">
+            {formatDntlsRequestedAt(application.createdAt)}
+          </span>
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        <Button
+          data-testid={`dntls-request-approve-${application.pubkey}`}
+          disabled={busy}
+          onClick={onApprove}
+          size="sm"
+        >
+          Approve
+        </Button>
+        <Button
+          data-testid={`dntls-request-reject-${application.pubkey}`}
+          disabled={busy}
+          onClick={onReject}
+          size="sm"
+          variant="outline"
+        >
+          Reject
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function CommunityMembersSettingsCard({
   currentPubkey,
 }: {
@@ -253,6 +313,9 @@ export function CommunityMembersSettingsCard({
   const currentRole = myMembershipQuery.data?.membership?.role ?? null;
   const canManageRelay = currentRole === "owner" || currentRole === "admin";
   const membersQuery = useRelayMembersQuery(canManageRelay);
+  const pendingQuery = useDntlsPendingApplicationsQuery(canManageRelay);
+  const decideMutation = useDecideDntlsApplicationMutation();
+  const dntlsNamesQuery = useDntlsNamesQuery();
   const members = React.useMemo(
     () => membersQuery.data ?? [],
     [membersQuery.data],
@@ -263,9 +326,53 @@ export function CommunityMembersSettingsCard({
       enabled: canManageRelay && members.length > 0,
     },
   );
-  const profiles = profilesQuery.data?.profiles;
+  const profiles = React.useMemo(
+    () =>
+      mergeVerifiedDntlsNames(
+        profilesQuery.data?.profiles,
+        dntlsNamesQuery.data ?? new Map(),
+      ),
+    [dntlsNamesQuery.data, profilesQuery.data?.profiles],
+  );
   const [inviteDialogOpen, setInviteDialogOpen] = React.useState(false);
   const [search, setSearch] = React.useState("");
+  const inFlightRef = React.useRef(new Set<string>());
+  const [inFlight, setInFlight] = React.useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const pendingApplications =
+    pendingQuery.data?.status === "ok" ? pendingQuery.data.applications : [];
+  const showRequests = canShowDntlsRequestsSection({
+    isSuccess: pendingQuery.isSuccess,
+    result: pendingQuery.data,
+    role: currentRole,
+  });
+
+  async function decideRequest(
+    application: DntlsPendingApplication,
+    decision: "approve" | "reject",
+  ) {
+    if (!beginDntlsRequestAction(inFlightRef.current, application.pubkey)) {
+      return;
+    }
+    setInFlight(new Set(inFlightRef.current));
+    try {
+      await decideMutation.mutateAsync({
+        decision,
+        fqdn: application.fqdn,
+        pubkey: application.pubkey,
+      });
+    } catch {
+      toast.error(
+        decision === "approve"
+          ? "Couldn’t approve this request."
+          : "Couldn’t reject this request.",
+      );
+    } finally {
+      endDntlsRequestAction(inFlightRef.current, application.pubkey);
+      setInFlight(new Set(inFlightRef.current));
+    }
+  }
 
   const filteredMembers = React.useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -274,10 +381,12 @@ export function CommunityMembersSettingsCard({
       const normalizedPubkey = normalizePubkey(member.pubkey);
       const profile = profiles?.[normalizedPubkey];
       const displayName = profile?.displayName?.toLowerCase() ?? "";
+      const verifiedName = profile?.verifiedDntlsName?.toLowerCase() ?? "";
       const nip05 = profile?.nip05Handle?.toLowerCase() ?? "";
       const npub = npubFromPubkey(member.pubkey)?.toLowerCase() ?? "";
       return (
         displayName.includes(q) ||
+        verifiedName.includes(q) ||
         nip05.includes(q) ||
         npub.includes(q) ||
         member.pubkey.toLowerCase().includes(q) ||
@@ -315,6 +424,24 @@ export function CommunityMembersSettingsCard({
         description="Manage members and community access."
       />
 
+      {showRequests ? (
+        <SettingsOptionGroup
+          data-testid="community-dntls-requests"
+          title="Requests"
+        >
+          <div className="divide-y divide-border/60 px-4 sm:px-5">
+            {pendingApplications.map((application) => (
+              <DntlsRequestRow
+                application={application}
+                busy={inFlight.has(normalizePubkey(application.pubkey))}
+                key={application.pubkey}
+                onApprove={() => void decideRequest(application, "approve")}
+                onReject={() => void decideRequest(application, "reject")}
+              />
+            ))}
+          </div>
+        </SettingsOptionGroup>
+      ) : null}
       <SettingsOptionGroup
         title={
           <>
