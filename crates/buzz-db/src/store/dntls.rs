@@ -25,15 +25,16 @@ pub enum UpsertJoinOutcome {
         /// Previous holder of this name, if the binding moved to `pubkey`.
         ///
         /// Returned even when that key is not demoted (`owner`, ordinary
-        /// `member`, or a pending row with no admin role).
+        /// `member`, or a pending row with no admin role). Approve ordinary
+        /// rebind removes a displaced approved non-owner membership in the
+        /// same transaction; `owner` rows are never touched.
         displaced: Option<String>,
-        /// Whether this call inserted `admin` or promoted `member` → `admin`
-        /// for `pubkey`. Ordinary member admission stays on
-        /// [`crate::relay_members::claim_relay_membership`].
+        /// Auto/admin path: inserted `admin` or promoted `member` → `admin`.
+        /// Approve ordinary rebind: inserted `member` for `pubkey`.
         membership_changed: bool,
     },
-    /// Approval mode found the name held by another key, or this key already
-    /// has an approved mapping for another name in the community.
+    /// This key already has an approved mapping for another name, or a
+    /// unique constraint prevented the write.
     NameAlreadyClaimed,
 }
 
@@ -88,12 +89,18 @@ async fn lock_application_bindings(
 
 /// Insert or replace this pubkey's pending application after a verified name.
 ///
-/// First-bound-wins: if a *different* pubkey already holds a pending or
-/// approved application for `fqdn` in `community`, returns
-/// [`UpsertJoinOutcome::NameAlreadyClaimed`] and writes nothing. Repeating a
-/// verified application for the same pubkey replaces its own pending row.
-/// A rejected pubkey is left rejected and cannot requeue. A different key
-/// proving the same name deletes that rejected row and inserts pending.
+/// A *different* pubkey's pending mapping for `fqdn` is replaced, keeping
+/// status `pending`. An approved mapping for `fqdn` is rebound to `pubkey`
+/// atomically: the name stays approved, `pubkey` is inserted as `member` if
+/// absent, and the displaced key's non-owner membership is removed.
+/// Repeating a verified application for the same pubkey replaces its own
+/// pending row. A rejected pubkey is left rejected and cannot requeue. A
+/// different key proving the same name deletes that rejected row and inserts
+/// pending.
+///
+/// An approved mapping for another name on this key is preserved: the
+/// transaction writes nothing and returns
+/// [`UpsertJoinOutcome::NameAlreadyClaimed`].
 pub async fn upsert_pending_application(
     pool: &PgPool,
     community: CommunityId,
@@ -117,22 +124,6 @@ pub async fn upsert_pending_application(
         return Ok(UpsertJoinOutcome::Rejected);
     }
 
-    let existing_fqdn: Option<String> = sqlx::query_scalar(
-        "SELECT pubkey FROM dntls_applications \
-         WHERE community_id = $1 AND fqdn = $2 AND pubkey <> $3 \
-           AND status IN ('pending', 'approved') \
-         FOR UPDATE",
-    )
-    .bind(community.as_uuid())
-    .bind(fqdn)
-    .bind(pubkey)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if existing_fqdn.is_some() {
-        tx.commit().await?;
-        return Ok(UpsertJoinOutcome::NameAlreadyClaimed);
-    }
-
     if existing_self.as_deref() == Some("approved") {
         let current_fqdn: String = sqlx::query_scalar(
             "SELECT fqdn FROM dntls_applications \
@@ -150,15 +141,85 @@ pub async fn upsert_pending_application(
         });
     }
 
-    sqlx::query(
-        "DELETE FROM dntls_applications \
-         WHERE community_id = $1 AND fqdn = $2 AND pubkey <> $3 AND status = 'rejected'",
+    let other = sqlx::query(
+        "SELECT pubkey, status FROM dntls_applications \
+         WHERE community_id = $1 AND fqdn = $2 AND pubkey <> $3 \
+         FOR UPDATE",
     )
     .bind(community.as_uuid())
     .bind(fqdn)
     .bind(pubkey)
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
+    if let Some(row) = other {
+        let other_pubkey: String = row.get("pubkey");
+        let other_status: String = row.get("status");
+        match other_status.as_str() {
+            "approved" => {
+                if existing_self.as_deref() == Some("pending") {
+                    sqlx::query(
+                        "DELETE FROM dntls_applications \
+                         WHERE community_id = $1 AND pubkey = $2 AND status = 'pending'",
+                    )
+                    .bind(community.as_uuid())
+                    .bind(pubkey)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                let rebound = sqlx::query(
+                    "UPDATE dntls_applications \
+                     SET pubkey = $3, created_at = now() \
+                     WHERE community_id = $1 AND fqdn = $2 \
+                       AND status = 'approved' AND pubkey = $4",
+                )
+                .bind(community.as_uuid())
+                .bind(fqdn)
+                .bind(pubkey)
+                .bind(&other_pubkey)
+                .execute(&mut *tx)
+                .await;
+                match rebound {
+                    Ok(_) => {}
+                    Err(sqlx::Error::Database(err)) if err.code().as_deref() == Some("23505") => {
+                        tx.rollback().await?;
+                        return Ok(UpsertJoinOutcome::NameAlreadyClaimed);
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+                let membership_changed = super::relay_members::insert_relay_member_on(
+                    &mut tx,
+                    community,
+                    pubkey,
+                    "member",
+                    Some("invite"),
+                )
+                .await?;
+                super::relay_members::remove_non_owner_relay_member_on(
+                    &mut tx,
+                    community,
+                    &other_pubkey,
+                )
+                .await?;
+                tx.commit().await?;
+                return Ok(UpsertJoinOutcome::Bound {
+                    displaced: Some(other_pubkey),
+                    membership_changed,
+                });
+            }
+            "pending" | "rejected" => {
+                sqlx::query(
+                    "DELETE FROM dntls_applications \
+                     WHERE community_id = $1 AND pubkey = $2 AND status = $3",
+                )
+                .bind(community.as_uuid())
+                .bind(&other_pubkey)
+                .bind(&other_status)
+                .execute(&mut *tx)
+                .await?;
+            }
+            _ => {}
+        }
+    }
 
     match existing_self.as_deref() {
         Some("pending") => {
@@ -176,14 +237,14 @@ pub async fn upsert_pending_application(
             match update {
                 Ok(_) => {}
                 Err(sqlx::Error::Database(err)) if err.code().as_deref() == Some("23505") => {
-                    tx.commit().await?;
+                    tx.rollback().await?;
                     return Ok(UpsertJoinOutcome::NameAlreadyClaimed);
                 }
                 Err(err) => return Err(err.into()),
             }
         }
         Some(_) => {
-            tx.commit().await?;
+            tx.rollback().await?;
             return Ok(UpsertJoinOutcome::NameAlreadyClaimed);
         }
         None => {
@@ -199,7 +260,7 @@ pub async fn upsert_pending_application(
             match insert {
                 Ok(_) => {}
                 Err(sqlx::Error::Database(err)) if err.code().as_deref() == Some("23505") => {
-                    tx.commit().await?;
+                    tx.rollback().await?;
                     return Ok(UpsertJoinOutcome::NameAlreadyClaimed);
                 }
                 Err(err) => return Err(err.into()),
@@ -416,7 +477,8 @@ pub async fn reject_application(
 }
 
 impl Db {
-    /// Insert or replace this pubkey's pending DNTLS application.
+    /// Insert or replace this pubkey's pending DNTLS application, or rebind
+    /// an approved name. See [`upsert_pending_application`].
     #[datastore_span(name = "upsert_dntls_pending_application", system = "postgresql")]
     pub async fn upsert_dntls_pending_application(
         &self,
@@ -664,10 +726,12 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn dntls_auto_rebinding_replaces_pending_but_approve_does_not() {
+    async fn dntls_approve_rebinding_replaces_pending_and_approved_names() {
         let (db, community) = test_db().await;
         let first = "aa".repeat(32);
         let second = "bb".repeat(32);
+        let third = "cc".repeat(32);
+        let approver = "dd".repeat(32);
         db.upsert_dntls_pending_application(community, &first, "alice.example")
             .await
             .expect("first pending");
@@ -677,46 +741,199 @@ mod tests {
         assert_eq!(
             db.upsert_dntls_pending_application(community, &second, "alice.example")
                 .await
-                .expect("approve conflict"),
-            UpsertJoinOutcome::NameAlreadyClaimed
-        );
-        assert_eq!(
-            db.upsert_dntls_approved_application(
-                community,
-                &second,
-                "alice.example",
-                &second,
-                false
-            )
-            .await
-            .expect("auto rebind"),
-            bound(Some(first.as_str()), false)
+                .expect("pending replace"),
+            UpsertJoinOutcome::Pending
         );
         assert!(db
-            .list_dntls_applications(community, "pending")
+            .get_dntls_application(community, &first)
             .await
-            .expect("pending")
-            .is_empty());
-        let rows = db
-            .list_dntls_applications(community, "approved")
+            .expect("displaced pending")
+            .is_none());
+        let pending = db
+            .get_dntls_application(community, &second)
             .await
-            .expect("approved");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].pubkey, second);
-        assert_eq!(rows[0].fqdn, "alice.example");
-        assert_eq!(role_of(&db, community, &first).await, None);
-        assert_eq!(role_of(&db, community, &second).await, None);
+            .expect("lookup")
+            .expect("pending");
+        assert_eq!(pending.fqdn, "alice.example");
+        assert_eq!(pending.status, "pending");
+
+        let (approved, changed) = db
+            .approve_dntls_application(community, &second, "alice.example", &approver, false)
+            .await
+            .expect("approve")
+            .expect("approved row");
+        assert!(changed);
+        assert_eq!(approved.status, "approved");
+        assert!(
+            db.update_relay_member_role(community, &second, "admin")
+                .await
+                .expect("promote displaced")
+        );
+
         assert_eq!(
             db.upsert_dntls_pending_application(community, &first, "alice.example")
                 .await
-                .expect("approved conflict"),
+                .expect("approved rebind"),
+            bound(Some(second.as_str()), true)
+        );
+        let rebound = db
+            .get_dntls_application(community, &first)
+            .await
+            .expect("lookup")
+            .expect("bound");
+        assert_eq!(rebound.fqdn, "alice.example");
+        assert_eq!(rebound.status, "approved");
+        assert_eq!(rebound.approved_at, approved.approved_at);
+        assert_eq!(rebound.approved_by, approved.approved_by);
+        assert!(db
+            .get_dntls_application(community, &second)
+            .await
+            .expect("displaced approved")
+            .is_none());
+        assert_eq!(
+            role_of(&db, community, &first).await.as_deref(),
+            Some("member")
+        );
+        assert_eq!(role_of(&db, community, &second).await, None);
+
+        db.add_relay_member(community, &third, "member", None)
+            .await
+            .expect("seed member");
+        assert_eq!(
+            db.upsert_dntls_pending_application(community, &third, "alice.example")
+                .await
+                .expect("existing member rebind"),
+            bound(Some(first.as_str()), false)
+        );
+        assert_eq!(
+            role_of(&db, community, &third).await.as_deref(),
+            Some("member")
+        );
+        assert_eq!(role_of(&db, community, &first).await, None);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_approve_rebinding_preserves_owner_isolates_tenants_and_rolls_back() {
+        let (db, community) = test_db().await;
+        let (_, other) = test_db().await;
+        let owner = "01".repeat(32);
+        let first = "aa".repeat(32);
+        let second = "bb".repeat(32);
+        let third = "cc".repeat(32);
+        let approver = "dd".repeat(32);
+
+        db.bootstrap_owner(community, &owner).await.expect("owner");
+        db.upsert_dntls_pending_application(community, &owner, "alice.example")
+            .await
+            .expect("owner pending");
+        db.approve_dntls_application(community, &owner, "alice.example", &approver, false)
+            .await
+            .expect("approve owner")
+            .expect("owner row");
+        assert_eq!(
+            role_of(&db, community, &owner).await.as_deref(),
+            Some("owner")
+        );
+
+        assert_eq!(
+            db.upsert_dntls_pending_application(community, &second, "alice.example")
+                .await
+                .expect("rebind owner name"),
+            bound(Some(owner.as_str()), true)
+        );
+        assert_eq!(
+            role_of(&db, community, &owner).await.as_deref(),
+            Some("owner")
+        );
+        assert_eq!(
+            role_of(&db, community, &second).await.as_deref(),
+            Some("member")
+        );
+        assert!(db
+            .get_dntls_application(community, &owner)
+            .await
+            .expect("owner mapping")
+            .is_none());
+        let rebound = db
+            .get_dntls_application(community, &second)
+            .await
+            .expect("lookup")
+            .expect("bound");
+        assert_eq!(rebound.fqdn, "alice.example");
+        assert_eq!(rebound.status, "approved");
+
+        db.upsert_dntls_pending_application(other, &first, "alice.example")
+            .await
+            .expect("other pending");
+        db.approve_dntls_application(other, &first, "alice.example", &approver, false)
+            .await
+            .expect("approve other")
+            .expect("other row");
+        assert_eq!(
+            db.get_dntls_application(other, &first)
+                .await
+                .expect("other lookup")
+                .expect("other binding")
+                .fqdn,
+            "alice.example"
+        );
+        assert_eq!(
+            role_of(&db, other, &first).await.as_deref(),
+            Some("member")
+        );
+        assert_eq!(role_of(&db, other, &second).await, None);
+        assert_eq!(
+            role_of(&db, community, &second).await.as_deref(),
+            Some("member")
+        );
+
+        db.upsert_dntls_pending_application(community, &third, "bob.example")
+            .await
+            .expect("bob pending");
+        db.approve_dntls_application(community, &third, "bob.example", &approver, false)
+            .await
+            .expect("approve bob")
+            .expect("bob row");
+        let before_alice = db
+            .get_dntls_application(community, &second)
+            .await
+            .expect("alice")
+            .unwrap();
+        let before_bob = db
+            .get_dntls_application(community, &third)
+            .await
+            .expect("bob")
+            .unwrap();
+        assert_eq!(
+            db.upsert_dntls_pending_application(community, &third, "alice.example")
+                .await
+                .expect("conflict"),
             UpsertJoinOutcome::NameAlreadyClaimed
         );
         assert_eq!(
-            db.list_dntls_applications(community, "approved")
+            db.get_dntls_application(community, &second)
                 .await
-                .expect("unchanged"),
-            rows
+                .expect("alice after"),
+            Some(before_alice)
+        );
+        assert_eq!(
+            db.get_dntls_application(community, &third)
+                .await
+                .expect("bob after"),
+            Some(before_bob)
+        );
+        assert_eq!(
+            role_of(&db, community, &second).await.as_deref(),
+            Some("member")
+        );
+        assert_eq!(
+            role_of(&db, community, &third).await.as_deref(),
+            Some("member")
+        );
+        assert_eq!(
+            role_of(&db, community, &owner).await.as_deref(),
+            Some("owner")
         );
     }
 

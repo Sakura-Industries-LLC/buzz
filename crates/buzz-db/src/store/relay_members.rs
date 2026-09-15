@@ -208,6 +208,25 @@ pub(crate) async fn demote_relay_admin_to_member_on(
     Ok(result.rows_affected() > 0)
 }
 
+/// Deletes a non-owner relay member on this connection. Never touches `owner`.
+///
+/// Returns `true` if a row was deleted.
+pub(crate) async fn remove_non_owner_relay_member_on(
+    conn: &mut sqlx::PgConnection,
+    community: CommunityId,
+    pubkey: &str,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "DELETE FROM relay_members \
+         WHERE community_id = $1 AND pubkey = $2 AND role <> 'owner'",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .execute(conn)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// Claims relay membership via an invite and atomically persists policy evidence.
 ///
 /// Returns `true` when membership was inserted, or `false` when the pubkey was
