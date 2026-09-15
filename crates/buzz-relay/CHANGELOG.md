@@ -1,13 +1,27 @@
 # Changelog
 
-## Unreleased
+## relay-v0.3.0
 
-- Add `BUZZ_DNTLS_ADMINS` for exact-name administrators in `auto` and `approve`
-  admission modes. Admin roles follow verified name rebinding atomically;
-  owners retain their role. Removing a configured name does not revoke an
-  existing role.
-- Apply verified-name admission on the DNTLS HTTP routes and keep manual
-  approval atomic with its membership grant.
+DNTLS join approval from Buzz Desktop. Requires database migration
+`0042_dntls_rejected_status` (applied automatically with `BUZZ_AUTO_MIGRATE`).
+
+- Bind administrator roles to DNTLS names with `BUZZ_DNTLS_ADMINS`, a
+  comma-separated list of exact FQDNs ([#29](https://github.com/Sakura-Industries-LLC/buzz/pull/29)).
+  A listed name is admitted immediately in every admission mode, including
+  `approve`, and is inserted or promoted to `admin`; the role follows the name
+  when it rebinds to a new key. `owner` is never changed, and removing a name
+  from the list revokes nothing. Requires `BUZZ_DNTLS_ADMISSION=auto` or
+  `approve`.
+- Complete the `approve` admission flow ([#31](https://github.com/Sakura-Industries-LLC/buzz/pull/31)).
+  A pending applicant's AUTH is answered with `restricted: dntls approval
+  pending` (HTTP: `403 dntls_approval_pending`) so clients can wait instead of
+  failing. `POST /api/dntls/reject` records `status = 'rejected'` instead of
+  deleting the row: the rejected key is answered with `restricted: not a relay
+  member` and cannot reapply, while a different key may still claim the name.
+  `POST /api/dntls/approve` accepts pending and rejected rows. Verified-name
+  admission also applies on the DNTLS HTTP routes.
+
+[Changes since relay-v0.2.2](https://github.com/Sakura-Industries-LLC/buzz/compare/relay-v0.2.2...relay-v0.3.0)
 
 ## relay-v0.2.2
 
