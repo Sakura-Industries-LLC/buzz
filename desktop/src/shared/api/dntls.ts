@@ -218,14 +218,14 @@ export async function listPendingDntlsApplications(): Promise<ListPendingDntlsAp
   return { status: "ok", applications: parseApplications(json) };
 }
 
-async function postDntlsDecision(
-  path: string,
-  pubkey: string,
-): Promise<void> {
+async function postDntlsDecision(path: string, pubkey: string): Promise<void> {
   const base = (await getRelayHttpUrl()).replace(/\/+$/, "");
   const url = `${base}${path}`;
   const body = JSON.stringify({ pubkey });
-  const authorization = await nip98PostHeader(await canonicalAuthUrl(url), body);
+  const authorization = await nip98PostHeader(
+    await canonicalAuthUrl(url),
+    body,
+  );
   const response = await fetch(url, {
     method: "POST",
     headers: {
@@ -243,12 +243,12 @@ async function postDntlsDecision(
   }
 }
 
-/** Owner/admin NIP-98 POST admitting a pending DNTLS application. */
+/** Owner/admin NIP-98 POST admitting a pending or rejected DNTLS application. */
 export async function approveDntlsApplication(pubkey: string): Promise<void> {
   await postDntlsDecision(APPROVE_PATH, pubkey);
 }
 
-/** Owner/admin NIP-98 POST dropping a pending DNTLS application. */
+/** Owner/admin NIP-98 POST rejecting a pending DNTLS application. */
 export async function rejectDntlsApplication(pubkey: string): Promise<void> {
   await postDntlsDecision(REJECT_PATH, pubkey);
 }

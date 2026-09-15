@@ -5,14 +5,12 @@ import {
   DNTLS_PENDING_REFETCH_INTERVAL_MS,
   dntlsPendingApplicationsQueryKey,
   removePendingDntlsApplication,
-  seedApprovedDntlsName,
 } from "@/features/community-members/lib/dntlsRequests";
 import { dntlsNamesQueryKey } from "@/features/profile/useDntlsNames";
 import {
   approveDntlsApplication,
   listPendingDntlsApplications,
   rejectDntlsApplication,
-  type DntlsNamesMap,
   type ListPendingDntlsApplicationsResult,
 } from "@/shared/api/dntls";
 import {
@@ -200,48 +198,46 @@ export function useDecideDntlsApplicationMutation() {
       decision,
     }: {
       pubkey: string;
-      fqdn: string;
       decision: "approve" | "reject";
     }) =>
       decision === "approve"
         ? approveDntlsApplication(pubkey)
         : rejectDntlsApplication(pubkey),
-    onMutate: async ({ pubkey, fqdn, decision }) => {
+    onMutate: async ({ pubkey }) => {
       const pendingKey = dntlsPendingApplicationsQueryKey(relayUrl);
       const namesKey = dntlsNamesQueryKey(relayUrl);
-      await Promise.all([
-        queryClient.cancelQueries({ queryKey: pendingKey }),
-        queryClient.cancelQueries({ queryKey: namesKey }),
-      ]);
+      await queryClient.cancelQueries({ queryKey: pendingKey });
       const previousPending =
         queryClient.getQueryData<ListPendingDntlsApplicationsResult>(
           pendingKey,
         );
-      const previousNames = queryClient.getQueryData<DntlsNamesMap>(namesKey);
 
       queryClient.setQueryData<ListPendingDntlsApplicationsResult>(
         pendingKey,
         (old) => removePendingDntlsApplication(old, pubkey),
       );
-      if (decision === "approve") {
-        queryClient.setQueryData<DntlsNamesMap>(namesKey, (old) =>
-          seedApprovedDntlsName(old, { pubkey, fqdn }, Date.now() / 1000),
-        );
-      }
-
-      return { pendingKey, namesKey, previousPending, previousNames };
+      return { pendingKey, namesKey, previousPending };
     },
-    onError: (_err, vars, context) => {
-      if (!context) return;
-      if (context.previousPending !== undefined) {
-        queryClient.setQueryData(context.pendingKey, context.previousPending);
-      }
-      if (vars.decision === "approve") {
-        queryClient.setQueryData(
-          context.namesKey,
-          context.previousNames ?? new Map(),
-        );
-      }
+    onError: (_err, { pubkey }, context) => {
+      const previous = context?.previousPending;
+      if (!context || previous?.status !== "ok") return;
+      const application = previous.applications.find(
+        (entry) => entry.pubkey === pubkey,
+      );
+      if (!application) return;
+      queryClient.setQueryData<ListPendingDntlsApplicationsResult>(
+        context.pendingKey,
+        (current) =>
+          current?.status === "ok" &&
+          !current.applications.some((entry) => entry.pubkey === pubkey)
+            ? {
+                status: "ok",
+                applications: [...current.applications, application].sort(
+                  (a, b) => a.createdAt - b.createdAt,
+                ),
+              }
+            : current,
+      );
     },
     onSettled: async (_data, _err, _vars, context) => {
       const pendingKey =

@@ -236,7 +236,10 @@ test("listPendingDntlsApplications maps applications and signs GET without paylo
       },
     );
     assert.equal(signed.length, 1);
-    assert.equal(tagValue(signed[0].tags, "u"), "https://relay.example/api/dntls/pending");
+    assert.equal(
+      tagValue(signed[0].tags, "u"),
+      "https://relay.example/api/dntls/pending",
+    );
     assert.equal(tagValue(signed[0].tags, "method"), "GET");
     assert.equal(tagValue(signed[0].tags, "payload"), undefined);
   } finally {
@@ -315,17 +318,14 @@ async function assertSignedPost(path, run) {
   );
   const body = JSON.stringify({ pubkey: PUBKEY });
   try {
-    await withFetch(
-      async (url, init) => {
-        assert.equal(url, `http://127.0.0.1:63330${path}`);
-        assert.equal(init.method, "POST");
-        assert.equal(init.body, body);
-        assert.equal(init.headers["Content-Type"], "application/json");
-        assert.match(init.headers.Authorization, /^Nostr /);
-        return new Response(JSON.stringify({ status: "ok" }));
-      },
-      run,
-    );
+    await withFetch(async (url, init) => {
+      assert.equal(url, `http://127.0.0.1:63330${path}`);
+      assert.equal(init.method, "POST");
+      assert.equal(init.body, body);
+      assert.equal(init.headers["Content-Type"], "application/json");
+      assert.match(init.headers.Authorization, /^Nostr /);
+      return new Response(JSON.stringify({ status: "ok" }));
+    }, run);
     assert.equal(signed.length, 1);
     assert.equal(
       tagValue(signed[0].tags, "u"),

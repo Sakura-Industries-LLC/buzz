@@ -44,7 +44,6 @@ import {
 import { VirtualizedList } from "@/shared/ui/VirtualizedList";
 import { CommunityInviteDialog } from "./CommunityInviteDialog";
 
-
 function npubFromPubkey(pubkey: string): string | null {
   try {
     return nip19.npubEncode(pubkey);
@@ -262,6 +261,7 @@ function DntlsRequestRow({
   const name = application.fqdn;
   return (
     <div
+      role="group"
       aria-label={dntlsRequestJoinCopy(name)}
       className="group/member flex min-h-14 items-center gap-3 px-1 py-2.5"
       data-testid={`dntls-request-row-${application.pubkey}`}
@@ -359,7 +359,6 @@ export function CommunityMembersSettingsCard({
     try {
       await decideMutation.mutateAsync({
         decision,
-        fqdn: application.fqdn,
         pubkey: application.pubkey,
       });
     } catch {

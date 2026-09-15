@@ -1,8 +1,4 @@
-import type {
-  DntlsNamesMap,
-  DntlsPendingApplication,
-  ListPendingDntlsApplicationsResult,
-} from "@/shared/api/dntls";
+import type { ListPendingDntlsApplicationsResult } from "@/shared/api/dntls";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export const DNTLS_PENDING_REFETCH_INTERVAL_MS = 5_000;
@@ -48,7 +44,7 @@ export function removePendingDntlsApplication(
   current: ListPendingDntlsApplicationsResult | undefined,
   pubkey: string,
 ): ListPendingDntlsApplicationsResult | undefined {
-  if (!current || current.status !== "ok") {
+  if (current?.status !== "ok") {
     return current;
   }
   const needle = normalizePubkey(pubkey);
@@ -58,23 +54,6 @@ export function removePendingDntlsApplication(
       (application) => normalizePubkey(application.pubkey) !== needle,
     ),
   };
-}
-
-export function seedApprovedDntlsName(
-  current: DntlsNamesMap | undefined,
-  application: Pick<DntlsPendingApplication, "pubkey" | "fqdn">,
-  approvedAtSeconds: number,
-): DntlsNamesMap {
-  const next = new Map(current ?? []);
-  const pubkey = normalizePubkey(application.pubkey);
-  if (!pubkey || !application.fqdn.trim()) {
-    return next;
-  }
-  next.set(pubkey, {
-    fqdn: application.fqdn.trim(),
-    approvedAt: approvedAtSeconds,
-  });
-  return next;
 }
 
 export function beginDntlsRequestAction(
