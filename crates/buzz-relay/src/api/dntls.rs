@@ -15,6 +15,8 @@
 //! mapping. Other `approve` connections replace pending bindings and inherit
 //! approval of an approved name, removing the displaced key's membership unless
 //! it is an owner. A newly verified key may replace a rejected mapping.
+//! In `approve` mode, subnames inherit membership (not admin) from the nearest
+//! approved DNTLS ancestor in this community, attributed to that ancestor's key.
 //!
 //! HTTP routes (all NIP-98 signed, outside the Nostr event data plane):
 //!
@@ -977,20 +979,13 @@ mod tests {
             let subname = Keys::generate();
             let (ok, _) =
                 auth_connection(state.clone(), &host, &subname, Some("buzz.josh.dntls")).await;
-            assert_eq!(ok, mode == DntlsAdmission::Auto);
+            assert!(ok, "subnames inherit membership, not the configured role");
             let member = state
                 .db
                 .get_relay_member(community.id, &subname.public_key().to_hex())
                 .await
                 .expect("subname membership");
-            assert_eq!(
-                member.map(|m| m.role).as_deref(),
-                if mode == DntlsAdmission::Auto {
-                    Some("member")
-                } else {
-                    None
-                }
-            );
+            assert_eq!(member.map(|m| m.role).as_deref(), Some("member"));
         }
     }
 
@@ -2390,5 +2385,384 @@ mod tests {
             .is_relay_member(community.id, &joiner.public_key().to_hex())
             .await
             .expect("membership"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_approve_subname_inherits_membership_and_parent_attribution() {
+        let host = format!("dntls-subname-{}.example", Uuid::new_v4().simple());
+        let state = dntls_test_state_on(&host, DntlsAdmission::Approve, TEST_REDIS_URL)
+            .await
+            .expect("requires Postgres and Redis");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .unwrap()
+            .unwrap();
+        let parent = Keys::generate();
+        let child = Keys::generate();
+        let parent_hex = parent.public_key().to_hex();
+        let child_hex = child.public_key().to_hex();
+        state
+            .db
+            .add_relay_member(community.id, &parent_hex, "owner", None)
+            .await
+            .unwrap();
+        state
+            .db
+            .upsert_dntls_approved_application(
+                community.id,
+                &parent_hex,
+                "josh.dntls",
+                &parent_hex,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let (ok, messages) =
+            auth_connection(state.clone(), &host, &child, Some("fizz.josh.dntls")).await;
+        assert!(ok, "subname AUTH: {messages:?}");
+        assert_eq!(
+            state
+                .db
+                .get_relay_member(community.id, &child_hex)
+                .await
+                .unwrap()
+                .unwrap()
+                .role,
+            "member"
+        );
+        let row = state
+            .db
+            .get_dntls_application(community.id, &child_hex)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, "approved");
+        assert_eq!(row.approved_by.as_deref(), Some(parent_hex.as_str()));
+        let events = state
+            .db
+            .query_events(&buzz_db::EventQuery {
+                kinds: Some(vec![8000, 13534]),
+                ..buzz_db::EventQuery::for_community(community.id)
+            })
+            .await
+            .unwrap();
+        let mut kinds: Vec<_> = events
+            .iter()
+            .map(|stored| stored.event.kind.as_u16())
+            .collect();
+        kinds.sort_unstable();
+        assert_eq!(kinds, [8000, 13534], "NIP-43 admission announcements");
+        for stored in &events {
+            let expected = if stored.event.kind.as_u16() == 8000 {
+                vec!["p", child_hex.as_str()]
+            } else {
+                vec!["member", child_hex.as_str(), "member"]
+            };
+            assert!(stored
+                .event
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice() == expected));
+        }
+
+        let response = send(
+            state.clone(),
+            &host,
+            Method::GET,
+            NAMES_PATH,
+            &child,
+            String::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let names = read_json(response).await;
+        let mut fqdns: Vec<_> = names["names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["fqdn"].as_str().unwrap())
+            .collect();
+        fqdns.sort_unstable();
+        assert_eq!(fqdns, ["fizz.josh.dntls", "josh.dntls"]);
+        let response = send(
+            state.clone(),
+            &host,
+            Method::GET,
+            PENDING_PATH,
+            &parent,
+            String::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            read_json(response).await["applications"],
+            serde_json::json!([])
+        );
+
+        // A verified replacement retains approval, but not the displaced membership.
+        let replacement = Keys::generate();
+        let response = send_with_dntls(
+            state.clone(),
+            &host,
+            Method::GET,
+            NAMES_PATH,
+            &replacement,
+            String::new(),
+            Some("fizz.josh.dntls"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!state
+            .db
+            .is_relay_member(community.id, &child_hex)
+            .await
+            .unwrap());
+        let rebound = state
+            .db
+            .get_dntls_application(community.id, &replacement.public_key().to_hex())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rebound.approved_by, row.approved_by);
+        assert_eq!(rebound.approved_at, row.approved_at);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_approve_subname_requires_approved_ancestor_in_community() {
+        for (parent_status, child_name) in [
+            ("pending", "fizz.josh.dntls"),
+            ("rejected", "fizz.josh.dntls"),
+            ("unbound", "fizz.josh.dntls"),
+            ("foreign", "fizz.josh.dntls"),
+            ("approved", "fizz.other.dntls"),
+            ("approved", "fizz.notjosh.dntls"),
+        ] {
+            let host = format!("dntls-subname-denied-{}.example", Uuid::new_v4().simple());
+            let state = dntls_test_state_on(&host, DntlsAdmission::Approve, TEST_REDIS_URL)
+                .await
+                .expect("requires Postgres and Redis");
+            let community = state
+                .db
+                .lookup_community_by_host(&host)
+                .await
+                .unwrap()
+                .unwrap();
+            let parent = Keys::generate().public_key().to_hex();
+            state
+                .db
+                .add_relay_member(community.id, &parent, "member", None)
+                .await
+                .unwrap();
+            match parent_status {
+                "pending" | "rejected" => {
+                    state
+                        .db
+                        .upsert_dntls_pending_application(community.id, &parent, "josh.dntls")
+                        .await
+                        .unwrap();
+                    if parent_status == "rejected" {
+                        state
+                            .db
+                            .reject_dntls_application(community.id, &parent)
+                            .await
+                            .unwrap();
+                    }
+                }
+                "approved" | "foreign" => {
+                    let target = if parent_status == "foreign" {
+                        state
+                            .db
+                            .ensure_configured_community(&format!("other-{host}"))
+                            .await
+                            .unwrap()
+                            .id
+                    } else {
+                        community.id
+                    };
+                    state
+                        .db
+                        .upsert_dntls_approved_application(
+                            target,
+                            &parent,
+                            "josh.dntls",
+                            &parent,
+                            false,
+                        )
+                        .await
+                        .unwrap();
+                }
+                _ => {}
+            }
+            let child = Keys::generate();
+            let (ok, messages) =
+                auth_connection(state.clone(), &host, &child, Some(child_name)).await;
+            assert!(!ok, "{parent_status}/{child_name}: {messages:?}");
+            assert!(
+                messages
+                    .iter()
+                    .any(|message| message.contains(AUTH_APPROVAL_PENDING)),
+                "{messages:?}"
+            );
+            let row = state
+                .db
+                .get_dntls_application(community.id, &child.public_key().to_hex())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.status, "pending");
+            assert!(row.approved_by.is_none());
+            assert!(!state
+                .db
+                .is_relay_member(community.id, &child.public_key().to_hex())
+                .await
+                .unwrap());
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_approve_subname_uses_nearest_approved_ancestor() {
+        let host = format!("dntls-subname-depth-{}.example", Uuid::new_v4().simple());
+        let state = dntls_test_state_on(&host, DntlsAdmission::Approve, TEST_REDIS_URL)
+            .await
+            .expect("requires Postgres and Redis");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .unwrap()
+            .unwrap();
+        let root = Keys::generate().public_key().to_hex();
+        let nearer_keys = Keys::generate();
+        let nearer = nearer_keys.public_key().to_hex();
+        state
+            .db
+            .upsert_dntls_pending_application(community.id, &nearer, "fizz.josh.dntls")
+            .await
+            .unwrap();
+        state
+            .db
+            .upsert_dntls_approved_application(community.id, &root, "josh.dntls", &root, false)
+            .await
+            .unwrap();
+
+        for (name, approver) in [
+            ("bot.fizz.josh.dntls", root.as_str()),
+            ("next.fizz.josh.dntls", nearer.as_str()),
+        ] {
+            let child = Keys::generate();
+            let response = send_with_dntls(
+                state.clone(),
+                &host,
+                Method::GET,
+                NAMES_PATH,
+                &child,
+                String::new(),
+                Some(name),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            let row = state
+                .db
+                .get_dntls_application(community.id, &child.public_key().to_hex())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.status, "approved");
+            assert_eq!(row.approved_by.as_deref(), Some(approver));
+            let (ok, messages) =
+                auth_connection(state.clone(), &host, &nearer_keys, Some("fizz.josh.dntls")).await;
+            assert!(ok, "pending ancestor inherits on retry: {messages:?}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_approve_subname_preserves_rejection_and_single_name_binding() {
+        let host = format!("dntls-subname-rejected-{}.example", Uuid::new_v4().simple());
+        let state = dntls_test_state_on(&host, DntlsAdmission::Approve, TEST_REDIS_URL)
+            .await
+            .expect("requires Postgres and Redis");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .unwrap()
+            .unwrap();
+        let parent = Keys::generate();
+        let child = Keys::generate();
+        let parent_hex = parent.public_key().to_hex();
+        let child_hex = child.public_key().to_hex();
+        state
+            .db
+            .upsert_dntls_pending_application(community.id, &child_hex, "fizz.josh.dntls")
+            .await
+            .unwrap();
+        state
+            .db
+            .reject_dntls_application(community.id, &child_hex)
+            .await
+            .unwrap();
+        state
+            .db
+            .upsert_dntls_approved_application(
+                community.id,
+                &parent_hex,
+                "josh.dntls",
+                &parent_hex,
+                false,
+            )
+            .await
+            .unwrap();
+        let (ok, messages) =
+            auth_connection(state.clone(), &host, &child, Some("fizz.josh.dntls")).await;
+        assert!(!ok, "{messages:?}");
+        let rejected = state
+            .db
+            .get_dntls_application(community.id, &child_hex)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rejected.status, "rejected");
+        assert!(!state
+            .db
+            .is_relay_member(community.id, &child_hex)
+            .await
+            .unwrap());
+
+        let replacement = Keys::generate();
+        let (ok, messages) =
+            auth_connection(state.clone(), &host, &replacement, Some("fizz.josh.dntls")).await;
+        assert!(
+            ok,
+            "a different verified key replaces rejection: {messages:?}"
+        );
+        assert!(state
+            .db
+            .get_dntls_application(community.id, &child_hex)
+            .await
+            .unwrap()
+            .is_none());
+
+        let (_, messages) =
+            auth_connection(state.clone(), &host, &replacement, Some("other.josh.dntls")).await;
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains(NAME_ALREADY_CLAIMED_NOTICE)),
+            "{messages:?}"
+        );
+        let row = state
+            .db
+            .get_dntls_application(community.id, &replacement.public_key().to_hex())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.fqdn, "fizz.josh.dntls");
     }
 }
