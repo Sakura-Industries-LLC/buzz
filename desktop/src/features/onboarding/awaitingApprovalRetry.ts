@@ -20,7 +20,8 @@ export function startAwaitingApprovalRetry(options: {
 }): () => void {
   const delayMs = options.delayMs ?? PENDING_AUTH_RETRY_MS;
   const schedule = options.schedule ?? setTimeout;
-  const unschedule = options.unschedule ?? clearTimeout;
+  const unschedule =
+    options.unschedule ?? ((id: unknown) => clearTimeout(id as number));
   let stopped = false;
   let timer: unknown = null;
 

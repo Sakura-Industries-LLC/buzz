@@ -87,7 +87,6 @@ export class RelayClient {
   private reconnectTimeout: number | null = null;
   private reconnectWaiters = new RelayReconnectWaiters();
   private reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
-  private nextReconnectDelayMs: number | null = null;
   private keepAliveRequested = false;
   private authRequest: RelayAuthRequest | null = null;
   private subscriptions = new Map<string, RelaySubscription>();
@@ -177,7 +176,6 @@ export class RelayClient {
     this.connectionStateEmitter.clear();
     this.onMessageChannel = null;
     this.reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
-    this.nextReconnectDelayMs = null;
   }
 
   async fetchChannelHistory(channelId: string, limit = 50) {
@@ -487,10 +485,7 @@ export class RelayClient {
 
   private async ensureConnected() {
     if (shouldRefuseConnect({ terminal: this.terminal })) {
-      // Terminal (e.g. relay rejected auth): refuse until disconnect() or
-      // preconnect() clears the latch, else the reconnect-timer catch and
-      // the publish/subscribe retry wrappers would race the terminal
-      // "disconnected" state back to "reconnecting".
+      // Only explicit re-engagement may clear a terminal authentication failure.
       throw new Error("Relay session is terminal; cannot reconnect.");
     }
 
@@ -909,7 +904,6 @@ export class RelayClient {
         authRequest.reject(error);
         this.resetConnection(error, {
           reconnect: decision === "retry",
-          delayMs: authReconnectDelayMs(message),
         });
       }
 
@@ -956,7 +950,7 @@ export class RelayClient {
     }
   }
 
-  private scheduleReconnect() {
+  private scheduleReconnect(forcedDelay?: number) {
     if (
       !shouldScheduleReconnect({
         terminal: this.terminal,
@@ -969,8 +963,6 @@ export class RelayClient {
       return;
     }
 
-    const forcedDelay = this.nextReconnectDelayMs;
-    this.nextReconnectDelayMs = null;
     const delay =
       forcedDelay ??
       Math.min(
@@ -1017,13 +1009,7 @@ export class RelayClient {
     }
   }
 
-  private resetConnection(
-    error: Error,
-    options?: {
-      reconnect?: boolean;
-      delayMs?: number;
-    },
-  ) {
+  private resetConnection(error: Error, options?: { reconnect?: boolean }) {
     this.onMessageChannel = null;
     this.stallWatchdog.stop();
     this.connectionGeneration++;
@@ -1034,9 +1020,6 @@ export class RelayClient {
     if (this.flushTimeout !== null) window.clearTimeout(this.flushTimeout);
     this.flushTimeout = null;
     this.eventBuffer = [];
-    if (options?.delayMs != null) {
-      this.nextReconnectDelayMs = options.delayMs;
-    }
 
     if (options?.reconnect === false) {
       this.terminal = true;
@@ -1092,7 +1075,7 @@ export class RelayClient {
       this.pendingEvents.delete(eventId);
     }
     if (options?.reconnect !== false) {
-      this.scheduleReconnect();
+      this.scheduleReconnect(authReconnectDelayMs(error.message));
     }
   }
 }

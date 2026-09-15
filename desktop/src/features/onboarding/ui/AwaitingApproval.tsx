@@ -1,7 +1,10 @@
 import * as React from "react";
 import { Ticket } from "lucide-react";
 
-import { dntlsCommunityName, dntlsCredentialsStatus } from "@/features/communities/dntlsConnector";
+import {
+  dntlsCommunityName,
+  dntlsCredentialsStatus,
+} from "@/features/communities/dntlsConnector";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
@@ -25,10 +28,13 @@ export function AwaitingApproval({
   const communityOnboarding = useCommunityOnboarding();
   const [isInviteFormOpen, setIsInviteFormOpen] = React.useState(false);
   const [applicantName, setApplicantName] = React.useState<string | null>(null);
+  const [inviteError, setInviteError] = React.useState<string | null>(null);
 
   const communityName = React.useMemo(() => {
     const hint = communityHint?.trim() ?? "";
-    return dntlsCommunityName(hint) ?? (hint.length > 0 ? hint : "this community");
+    return (
+      dntlsCommunityName(hint) ?? (hint.length > 0 ? hint : "this community")
+    );
   }, [communityHint]);
 
   React.useEffect(() => {
@@ -49,12 +55,17 @@ export function AwaitingApproval({
 
   const handleInviteRedeem = React.useCallback(
     (relayWsUrl: string, code: string, policyReceipt?: string) => {
-      communityOnboarding.start({
+      const started = communityOnboarding.start({
         source: "membership-recovery",
         relayUrl: relayWsUrl,
         inviteCode: code,
         policyReceipt,
       });
+      if (!started) {
+        setInviteError(
+          "Change community before using an invite for another community.",
+        );
+      }
     },
     [communityOnboarding],
   );
@@ -88,7 +99,7 @@ export function AwaitingApproval({
           {isInviteFormOpen ? (
             <InviteRedeemForm
               defaultRelayUrl={activeRelayUrl}
-              error={null}
+              error={inviteError}
               isRedeeming={false}
               onCancel={() => setIsInviteFormOpen(false)}
               onRedeem={handleInviteRedeem}

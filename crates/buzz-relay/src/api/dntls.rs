@@ -11,7 +11,8 @@
 //! their admin role follows the binding, while displaced keys retain ordinary
 //! membership and owners keep their role. Unlisted names retain their existing
 //! roles on rebind. A key already approved for another name cannot take a second
-//! mapping. Other `approve` connections cannot replace another key's mapping.
+//! mapping. Other `approve` connections cannot replace a pending or approved
+//! mapping, but a newly verified key may replace a rejected mapping.
 //!
 //! HTTP routes (all NIP-98 signed, outside the Nostr event data plane):
 //!
@@ -19,8 +20,9 @@
 //! - `POST /api/dntls/approve` — admit a pending or rejected pubkey through the
 //!   same membership path invite claims use, and retain the verified-name mapping.
 //! - `POST /api/dntls/reject` — mark a pending application rejected. Owner/admin
-//!   only. The same pubkey cannot requeue; another key may still apply for the
-//!   name. Approve recovers a rejected row (no un-reject UI).
+//!   only. The same pubkey cannot requeue while rejected. A different key proving
+//!   the same name replaces the rejected row with a new pending application.
+//!   Approve recovers a rejected row until it is replaced (no un-reject UI).
 //! - `GET /api/dntls/names` — list approved pubkey→fqdn mappings. Any member.
 //!
 //! Feature-gated by `BUZZ_DNTLS_ADMISSION`. When `off` (default), every route
@@ -399,8 +401,7 @@ pub async fn approve(
         .get_dntls_application(tenant.community(), &target)
         .await
         .map_err(|e| super::internal_error(&format!("dntls approve lookup: {e}")))?;
-    let Some(existing) =
-        existing.filter(|row| row.status == "pending" || row.status == "rejected")
+    let Some(existing) = existing.filter(|row| row.status == "pending" || row.status == "rejected")
     else {
         return Err(super::api_error(
             StatusCode::NOT_FOUND,
@@ -1807,8 +1808,7 @@ mod tests {
             "{messages:?}"
         );
 
-        let (ok, messages) =
-            auth_connection(state, &host, &other, Some("alice.example")).await;
+        let (ok, messages) = auth_connection(state, &host, &other, Some("alice.example")).await;
         assert!(!ok, "{messages:?}");
         assert!(
             messages
@@ -1875,7 +1875,10 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert_eq!(
-            read_json(response).await.get("error").and_then(Value::as_str),
+            read_json(response)
+                .await
+                .get("error")
+                .and_then(Value::as_str),
             Some(HTTP_APPROVAL_PENDING)
         );
 
@@ -1891,7 +1894,10 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert_eq!(
-            read_json(response).await.get("error").and_then(Value::as_str),
+            read_json(response)
+                .await
+                .get("error")
+                .and_then(Value::as_str),
             Some("relay_membership_required")
         );
 
@@ -1907,7 +1913,10 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert_eq!(
-            read_json(response).await.get("error").and_then(Value::as_str),
+            read_json(response)
+                .await
+                .get("error")
+                .and_then(Value::as_str),
             Some("relay_membership_required")
         );
     }
@@ -1936,7 +1945,10 @@ mod tests {
             .await;
             assert_eq!(response.status(), StatusCode::FORBIDDEN, "{admission:?}");
             assert_eq!(
-                read_json(response).await.get("error").and_then(Value::as_str),
+                read_json(response)
+                    .await
+                    .get("error")
+                    .and_then(Value::as_str),
                 Some("relay_membership_required"),
                 "{admission:?}"
             );

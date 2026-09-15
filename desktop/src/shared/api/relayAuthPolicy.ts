@@ -35,7 +35,8 @@ export type AuthOkDecision = "authenticated" | "retry" | "terminal";
 export const MAX_CONSECUTIVE_AUTH_REJECTIONS = 3;
 
 /** Exact AUTH `OK false` reason the relay sends for a queued DNTLS applicant. */
-export const DNTLS_APPROVAL_PENDING_REASON = "restricted: dntls approval pending";
+export const DNTLS_APPROVAL_PENDING_REASON =
+  "restricted: dntls approval pending";
 
 /** HTTP 403 error code for the same pending admission gate (NIP-98). */
 export const DNTLS_APPROVAL_PENDING_CODE = "dntls_approval_pending";
@@ -55,14 +56,14 @@ export function armRelayAuthentication(
   setRequest: (request: RelayAuthRequest) => void,
   onTimeout: (error: Error) => void,
 ): Promise<void> {
-  const { promise, resolve, reject } = Promise.withResolvers<void>();
-  const timeout = window.setTimeout(() => {
-    const error = new Error("Relay authentication timed out.");
-    onTimeout(error);
-    reject(error);
-  }, timeoutMs);
-  setRequest({ pendingEventId: "", resolve, reject, timeout });
-  return promise;
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      const error = new Error("Relay authentication timed out.");
+      onTimeout(error);
+      reject(error);
+    }, timeoutMs);
+    setRequest({ pendingEventId: "", resolve, reject, timeout });
+  });
 }
 
 /** True when an AUTH/HTTP error string is the DNTLS pending-admission signal. */

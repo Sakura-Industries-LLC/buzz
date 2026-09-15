@@ -50,6 +50,12 @@ test("pending then generic denial switches the gate to MembershipDenied", () => 
 });
 
 test("unrelated errors do not open a membership gate", () => {
-  assert.equal(membershipGateViewForError(new Error("relay unreachable")), null);
-  assert.equal(membershipGateViewForError("restricted: not a relay member"), null);
+  assert.equal(
+    membershipGateViewForError(new Error("relay unreachable")),
+    null,
+  );
+  assert.equal(
+    membershipGateViewForError("restricted: not a relay member"),
+    null,
+  );
 });

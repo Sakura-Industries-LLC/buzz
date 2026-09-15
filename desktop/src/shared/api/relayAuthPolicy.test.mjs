@@ -113,10 +113,7 @@ test("pending DNTLS approval retries without latching past the streak cap", () =
 test("ordinary membership denial is terminal after a pending wait", () => {
   const tracker = new AuthOkTracker();
   for (let i = 0; i < 6; i++) {
-    assert.equal(
-      tracker.record(false, DNTLS_APPROVAL_PENDING_REASON),
-      "retry",
-    );
+    assert.equal(tracker.record(false, DNTLS_APPROVAL_PENDING_REASON), "retry");
   }
   assert.equal(
     tracker.record(false, "restricted: not a relay member"),
@@ -142,7 +139,10 @@ test("pending AUTH uses the fixed reconnect cadence", () => {
     authReconnectDelayMs(DNTLS_APPROVAL_PENDING_REASON),
     PENDING_AUTH_RETRY_MS,
   );
-  assert.equal(authReconnectDelayMs("restricted: not a relay member"), undefined);
+  assert.equal(
+    authReconnectDelayMs("restricted: not a relay member"),
+    undefined,
+  );
   assert.equal(
     isDntlsApprovalPendingReason(
       `relay returned 403: ${DNTLS_APPROVAL_PENDING_CODE}`,

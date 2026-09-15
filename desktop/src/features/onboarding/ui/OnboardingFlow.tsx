@@ -246,10 +246,7 @@ export function OnboardingFlow({
         // this passes instantly. On gated relays it prevents a 403 during save.
         const membershipStatus = await checkMembershipStatus();
         setMembershipError(null);
-        if (
-          membershipStatus === "denied" ||
-          membershipStatus === "pending"
-        ) {
+        if (membershipStatus === "denied" || membershipStatus === "pending") {
           try {
             const identity = await getIdentity();
             setDeniedPubkey(identity.pubkey);
@@ -336,6 +333,11 @@ export function OnboardingFlow({
       showAvatarPage,
     ],
   );
+  const resumeApprovalRef = React.useRef(saveProfileAndContinue);
+  React.useEffect(() => {
+    resumeApprovalRef.current = saveProfileAndContinue;
+  }, [saveProfileAndContinue]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: each community owns its timer and subscriptions; switching must cancel the previous ones.
   React.useEffect(() => {
     if (currentPage !== "awaiting-approval") return;
     let cancelled = false;
@@ -344,7 +346,7 @@ export function OnboardingFlow({
       if (!cancelled) setCurrentPage("membership-denied");
     };
     const resume = () => {
-      if (!cancelled) void saveProfileAndContinue(membershipRetryPage);
+      if (!cancelled) void resumeApprovalRef.current("complete");
     };
     const classifyError = (error: unknown) => {
       if (membershipGateViewForError(error) === "membership-denied") {
@@ -376,13 +378,7 @@ export function OnboardingFlow({
       unsub();
       stop();
     };
-  }, [
-    activeCommunity?.id,
-    activeCommunity?.relayUrl,
-    currentPage,
-    membershipRetryPage,
-    saveProfileAndContinue,
-  ]);
+  }, [activeCommunity?.id, activeCommunity?.relayUrl, currentPage]);
 
   const updateDisplayNameDraft = React.useCallback(
     (value: string) => {
@@ -562,9 +558,7 @@ export function OnboardingFlow({
       <>
         <AwaitingApproval
           activeRelayUrl={activeCommunity?.relayUrl ?? ""}
-          communityHint={
-            activeCommunity?.dntlsName ?? activeCommunity?.name
-          }
+          communityHint={activeCommunity?.dntlsName ?? activeCommunity?.name}
           onChangeCommunity={() => setIsCommunityChangeOpen(true)}
         />
         {isCommunityChangeOpen ? (

@@ -260,8 +260,7 @@ function DntlsRequestRow({
   const npub = npubFromPubkey(application.pubkey) ?? application.pubkey;
   const name = application.fqdn;
   return (
-    <div
-      role="group"
+    <section
       aria-label={dntlsRequestJoinCopy(name)}
       className="group/member flex min-h-14 items-center gap-3 px-1 py-2.5"
       data-testid={`dntls-request-row-${application.pubkey}`}
@@ -300,7 +299,7 @@ function DntlsRequestRow({
           Reject
         </Button>
       </div>
-    </div>
+    </section>
   );
 }
 

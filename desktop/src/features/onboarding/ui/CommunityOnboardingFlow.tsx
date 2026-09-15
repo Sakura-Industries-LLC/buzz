@@ -306,56 +306,88 @@ export function CommunityOnboardingFlow({
   const routeMembershipError = React.useCallback(async (error: unknown) => {
     const view = membershipGateViewForError(error);
     if (view == null) return false;
-    try {
-      const identity = await getIdentity();
-      setDeniedPubkey(identity.pubkey);
-    } catch {
-      setDeniedPubkey("");
-    }
-    if (view === "awaiting-approval") {
-      setIsMembershipDenied(false);
-      setIsAwaitingApproval(true);
-    } else {
-      setIsAwaitingApproval(false);
-      setIsMembershipDenied(true);
-    }
+    const identity = await getIdentity().catch(() => null);
+    setDeniedPubkey(identity?.pubkey ?? "");
+    setIsMembershipDenied(view === "membership-denied");
+    setIsAwaitingApproval(view === "awaiting-approval");
     return true;
   }, []);
-  const tryEnterAfterApproval = React.useCallback(async () => {
-    if (!transaction) return "pending";
-    if (awaitingResumeRef.current === "save-profile") {
-      const name = displayName.trim();
-      if (!name) return "pending";
+  const publishProfileDraft = React.useCallback(
+    async (targetRelayUrl: string) => {
+      const candidateAvatarUrl = avatarUrl.trim();
+      const presentationState = avatarPresentation?.state;
+      const shouldSaveCandidate =
+        candidateAvatarUrl.length > 0 &&
+        presentationState !== "failed" &&
+        presentationState !== "pending";
+      const deferredAvatar =
+        candidateAvatarUrl && presentationState && presentationState !== "ready"
+          ? registerAvatarWhenReady({
+              avatarUrl: candidateAvatarUrl,
+              relayUrl: targetRelayUrl,
+            })
+          : null;
       try {
-        await updateProfile({ displayName: name });
+        const profile = await updateProfile({
+          displayName: displayName.trim(),
+          avatarUrl: shouldSaveCandidate ? candidateAvatarUrl : undefined,
+        });
+        deferredAvatar?.release({
+          expectedPubkey: profile.pubkey,
+          expectedAvatarUrl: profile.avatarUrl,
+        });
       } catch (error) {
-        const view = membershipGateViewForError(error);
-        if (view === "membership-denied") return "denied";
-        return "pending";
+        deferredAvatar?.cancel();
+        throw error;
       }
-    } else if (transaction.dntlsName) {
-      const status = await dntlsCredentialsStatus().catch(() => null);
-      const userName = status?.user_name;
-      if (!userName) {
+    },
+    [avatarUrl, avatarPresentation?.state, displayName],
+  );
+  const tryEnterAfterApproval = React.useCallback(
+    async (isCurrent: () => boolean) => {
+      if (!transaction) return "pending";
+      if (awaitingResumeRef.current === "save-profile") {
+        const name = displayName.trim();
+        if (!name) return "pending";
+        try {
+          await publishProfileDraft(transaction.relayUrl);
+        } catch (error) {
+          const view = membershipGateViewForError(error);
+          if (view === "membership-denied") return "denied";
+          return "pending";
+        }
+      } else if (transaction.dntlsName) {
+        const status = await dntlsCredentialsStatus().catch(() => null);
+        const userName = status?.user_name;
+        if (!userName) {
+          if (!isCurrent()) return "pending";
+          setIsAwaitingApproval(false);
+          return "continue";
+        }
+        try {
+          await updateProfile({ displayName: userName });
+        } catch (error) {
+          const view = membershipGateViewForError(error);
+          if (view === "membership-denied") return "denied";
+          return "pending";
+        }
+      } else {
+        if (!isCurrent()) return "pending";
         setIsAwaitingApproval(false);
         return "continue";
       }
-      try {
-        await updateProfile({ displayName: userName });
-      } catch (error) {
-        const view = membershipGateViewForError(error);
-        if (view === "membership-denied") return "denied";
-        return "pending";
-      }
-    } else {
+      if (!isCurrent()) return "pending";
       setIsAwaitingApproval(false);
+      setTransitionDirection("forward");
+      await finalize();
       return "continue";
-    }
-    setIsAwaitingApproval(false);
-    setTransitionDirection("forward");
-    update({ stage: "team-intro", error: undefined }, transaction.id);
-    return "continue";
-  }, [displayName, transaction, update]);
+    },
+    [displayName, publishProfileDraft, transaction, finalize],
+  );
+  const approvalAttemptRef = React.useRef(tryEnterAfterApproval);
+  React.useEffect(() => {
+    approvalAttemptRef.current = tryEnterAfterApproval;
+  }, [tryEnterAfterApproval]);
   // Skip the display-name step when the relay already has a profile, or when
   // this is a DNTLS community: the verified DNTLS name the user chose is
   // their name, so it is published as the display name without asking.
@@ -455,13 +487,24 @@ export function CommunityOnboardingFlow({
     return () => resizeObserver.disconnect();
   }, [isAvatarEditorOpen]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a replacement transaction must discard the previous membership gate.
   React.useEffect(() => {
     setIsAwaitingApproval(false);
     setIsMembershipDenied(false);
   }, [transaction?.id]);
-
   React.useEffect(() => {
-    if (!isAwaitingApproval || !transaction) return;
+    if (transaction?.stage === "claiming") {
+      setIsAwaitingApproval(false);
+      setIsMembershipDenied(false);
+    }
+  }, [transaction?.stage]);
+
+  const approvalTransactionId = transaction?.id;
+  const approvalRelayUrl = transaction?.relayUrl;
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: changing the relay cancels in-flight approval results even when the transaction ID stays the same.
+  React.useEffect(() => {
+    if (!isAwaitingApproval || !approvalTransactionId) return;
     let cancelled = false;
 
     const showDenied = () => {
@@ -471,10 +514,12 @@ export function CommunityOnboardingFlow({
     };
     const resume = () => {
       if (cancelled) return;
-      void tryEnterAfterApproval().then((result) => {
-        if (cancelled) return;
-        if (result === "denied") showDenied();
-      });
+      void approvalAttemptRef
+        .current(() => !cancelled)
+        .then((result) => {
+          if (cancelled) return;
+          if (result === "denied") showDenied();
+        });
     };
     const classifyError = (error: unknown) => {
       if (membershipGateViewForError(error) === "membership-denied") {
@@ -491,7 +536,7 @@ export function CommunityOnboardingFlow({
       }
     });
     const stop = startAwaitingApprovalRetry({
-      attempt: tryEnterAfterApproval,
+      attempt: () => approvalAttemptRef.current(() => !cancelled),
       onContinue: () => {},
       onDenied: showDenied,
     });
@@ -501,11 +546,7 @@ export function CommunityOnboardingFlow({
       unsub();
       stop();
     };
-  }, [
-    isAwaitingApproval,
-    transaction,
-    tryEnterAfterApproval,
-  ]);
+  }, [isAwaitingApproval, approvalTransactionId, approvalRelayUrl]);
 
   if (!transaction) return null;
 
@@ -580,34 +621,7 @@ export function CommunityOnboardingFlow({
     if (!displayName.trim()) return;
     setIsPending(true);
     try {
-      const candidateAvatarUrl = avatarUrl.trim();
-      const presentationState = avatarPresentation?.state;
-      const shouldSaveCandidate =
-        candidateAvatarUrl.length > 0 &&
-        presentationState !== "failed" &&
-        presentationState !== "pending";
-
-      const deferredAvatar =
-        candidateAvatarUrl && presentationState && presentationState !== "ready"
-          ? registerAvatarWhenReady({
-              avatarUrl: candidateAvatarUrl,
-              relayUrl: transaction.relayUrl,
-            })
-          : null;
-
-      try {
-        const profile = await updateProfile({
-          displayName: displayName.trim(),
-          avatarUrl: shouldSaveCandidate ? candidateAvatarUrl : undefined,
-        });
-        deferredAvatar?.release({
-          expectedPubkey: profile.pubkey,
-          expectedAvatarUrl: profile.avatarUrl,
-        });
-      } catch (error) {
-        deferredAvatar?.cancel();
-        throw error;
-      }
+      await publishProfileDraft(transaction.relayUrl);
       setTransitionDirection("forward");
       update({ stage: "team-intro", error: undefined });
     } catch (error) {

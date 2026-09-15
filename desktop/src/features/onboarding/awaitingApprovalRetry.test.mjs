@@ -48,7 +48,7 @@ test("a later generic denial reports denied instead of continuing to wait", asyn
     timers.push(fn);
     return timers.length - 1;
   };
-  let results = ["pending", "denied"];
+  const results = ["pending", "denied"];
   let denied = 0;
   let continued = 0;
   startAwaitingApprovalRetry({
