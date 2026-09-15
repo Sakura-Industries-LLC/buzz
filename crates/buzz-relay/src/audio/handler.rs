@@ -251,6 +251,7 @@ async fn handle_active_audio_connection(
         tenant.community(),
         pubkey.as_bytes(),
         auth_tag_json.as_deref(),
+        None,
     )
     .await
     .is_err()

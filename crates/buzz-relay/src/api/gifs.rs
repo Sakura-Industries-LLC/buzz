@@ -155,6 +155,7 @@ async fn authenticate(
         headers
             .get("x-auth-tag")
             .and_then(|value| value.to_str().ok()),
+        super::dntls::verified_name_from_headers(headers).as_deref(),
     )
     .await?;
 
