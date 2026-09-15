@@ -764,11 +764,10 @@ mod tests {
             .expect("approved row");
         assert!(changed);
         assert_eq!(approved.status, "approved");
-        assert!(
-            db.update_relay_member_role(community, &second, "admin")
-                .await
-                .expect("promote displaced")
-        );
+        assert!(db
+            .update_relay_member_role(community, &second, "admin")
+            .await
+            .expect("promote displaced"));
 
         assert_eq!(
             db.upsert_dntls_pending_application(community, &first, "alice.example")
@@ -878,10 +877,7 @@ mod tests {
                 .fqdn,
             "alice.example"
         );
-        assert_eq!(
-            role_of(&db, other, &first).await.as_deref(),
-            Some("member")
-        );
+        assert_eq!(role_of(&db, other, &first).await.as_deref(), Some("member"));
         assert_eq!(role_of(&db, other, &second).await, None);
         assert_eq!(
             role_of(&db, community, &second).await.as_deref(),

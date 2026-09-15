@@ -225,11 +225,17 @@ test("pending first DNTLS join rejection shows declined request without profile"
     .toBe("connecting");
 });
 
-test("approved DNTLS reinstall enters without membership prompt", async ({
+test("approved DNTLS reinstall needs no further membership approval", async ({
   page,
 }) => {
   test.setTimeout(45_000);
   await bootFirstCommunity(page);
   await joinFirstDntlsCommunity(page);
+  await expect(
+    page.getByRole("button", { name: "Take me to Buzz" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("awaiting-approval")).toHaveCount(0);
+  await expect(page.getByTestId("membership-denied")).toHaveCount(0);
+  await page.getByRole("button", { name: "Take me to Buzz" }).click();
   await expectAutoEntered(page);
 });

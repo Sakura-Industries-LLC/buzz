@@ -1550,6 +1550,9 @@ mod tests {
         db.publish_nip43_membership_locked(community, &relay)
             .await
             .expect("first snapshot");
+        add_relay_member(&pool, community, &test_pubkey(), "member", None)
+            .await
+            .expect("change membership before replacing the snapshot");
         db.publish_nip43_membership_locked(community, &relay)
             .await
             .expect("second snapshot");
@@ -1588,11 +1591,7 @@ mod tests {
 
         let relay = nostr::Keys::generate();
         let ts = nostr::Timestamp::now();
-        let fresh = membership_snapshot_event(
-            &relay,
-            ts,
-            &[(&owner, "owner"), (&extra, "member")],
-        );
+        let fresh = membership_snapshot_event(&relay, ts, &[(&owner, "owner"), (&extra, "member")]);
         let mut stale = membership_snapshot_event(&relay, ts, &[(&owner, "owner")]);
         while stale.id.as_bytes() >= fresh.id.as_bytes() {
             stale = membership_snapshot_event(&relay, ts, &[(&owner, "owner")]);

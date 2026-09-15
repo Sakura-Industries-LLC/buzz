@@ -27,8 +27,7 @@ pub(crate) async fn enforce_http_admission(
     pubkey: &nostr::PublicKey,
     headers: &HeaderMap,
 ) -> Result<(), (StatusCode, Json<Value>)> {
-    let http_auth_tag = crate::handlers::auth::http_auth_tag_json(headers);
-    if !crate::handlers::auth::is_verified_delegated_auth(pubkey, http_auth_tag.as_deref()) {
+    if !crate::handlers::auth::http_has_auth_tag(headers) {
         super::dntls::apply_http_admission(state, tenant, headers, &pubkey.to_hex()).await?;
     }
 

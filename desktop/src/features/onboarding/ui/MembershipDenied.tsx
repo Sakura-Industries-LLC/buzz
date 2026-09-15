@@ -14,11 +14,7 @@ import { writeTextToClipboard } from "@/shared/lib/clipboard";
 type MembershipDeniedProps = {
   /** The relay that denied membership — used as the target for bare-code invites. */
   activeRelayUrl: string;
-  /**
-   * True when the caller already proved a DNTLS name. Established from the
-   * onboarding transaction or active community, not from a distinct error
-   * code: a rejected DNTLS key still gets `restricted: not a relay member`.
-   */
+  /** Show declined-request recovery for a verified DNTLS community caller. */
   dntlsDeclined?: boolean;
   onBack: () => void;
   onChangeCommunity: () => void;
@@ -124,7 +120,7 @@ export function MembershipDenied({
           </div>
           <p className="text-sm leading-6 text-muted-foreground">
             {dntlsDeclined
-              ? "An admin declined this request. You can try again later or join a different community."
+              ? "An admin declined this request. Contact a community admin if you think this is a mistake, or join a different community."
               : "This relay requires an invitation. Ask a relay admin to add you as a member, then come back and try again."}
           </p>
         </div>
