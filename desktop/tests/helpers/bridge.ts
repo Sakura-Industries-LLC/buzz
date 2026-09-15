@@ -171,9 +171,12 @@ type MockBridgeOptions = {
   } | null;
   /**
    * Stored DNTLS identity name. Omit to pretend a credentials file is already
-   * present; set `null` to exercise the first-run resolver path.
+   * present; set `null` to exercise first-run code entry.
    */
   dntlsCredentialsName?: string | null;
+  dntlsRedeemName?: string;
+  dntlsRedeemError?: { code: string; message: string };
+  dntlsConnectorError?: { code: string; message: string };
   /** Bound Builderlab Nostr identity. Null/omitted = not linked yet. */
   builderlabIdentity?: { npub?: string; pubkey_hex?: string } | null;
   /** Communities owned by the mocked Builderlab account. */

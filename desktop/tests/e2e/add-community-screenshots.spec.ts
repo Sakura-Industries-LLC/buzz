@@ -131,37 +131,32 @@ test("prompts for a DNTLS name before the first DNTLS community", async ({
     .fill("community.example.dntls");
   await page.getByTestId("invite-redeem-submit").click();
 
-  const picker = page.getByTestId("dntls-identity-picker");
-  await expect(picker).toBeVisible();
-  await picker.getByTestId("dntls-identity-picker-show-names").click();
-  await picker
-    .getByTestId("dntls-identity-picker-name-demo-alice.dntls")
-    .click();
-  await picker.getByTestId("dntls-identity-picker-use-name").click();
-  await expect(picker.getByTestId("dntls-identity-picker-bound")).toContainText(
-    "Buzz is bound as buzz.demo-alice.dntls",
+  const form = page.getByTestId("dntls-credential-code-form");
+  await expect(form).toBeVisible();
+  await form.getByTestId("dntls-credential-code-input").fill("AAAA-BBBB-CCCC");
+  await form.getByTestId("dntls-credential-code-connect").click();
+  await expect(form.getByTestId("dntls-credential-code-bound")).toContainText(
+    "Buzz is connected as demo-alice.dntls",
   );
-  await picker.getByTestId("dntls-identity-picker-continue").click();
+  await form.getByTestId("dntls-credential-code-continue").click();
 
   await expect
     .poll(() =>
       page.evaluate((commands) => {
         const payloads = window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [];
-        const listIndex = payloads.findIndex(
-          (entry) => entry.command === commands.listIdentities,
-        );
-        const bindIndex = payloads.findIndex(
-          (entry) =>
-            entry.command === commands.bindIdentity &&
-            entry.payload?.name === "demo-alice.dntls",
+        const redeemIndex = payloads.findIndex(
+          (entry) => entry.command === commands.redeemCredentialCode,
         );
         const startIndex = payloads.findIndex(
           (entry) =>
             entry.command === commands.startConnector &&
             entry.payload?.community === "community.example.dntls",
         );
+        const redeemLoggedCode = payloads[redeemIndex]?.payload?.code;
         return (
-          listIndex >= 0 && bindIndex > listIndex && startIndex > bindIndex
+          redeemIndex >= 0 &&
+          startIndex > redeemIndex &&
+          redeemLoggedCode == null
         );
       }, DNTLS_DESKTOP_COMMANDS),
     )

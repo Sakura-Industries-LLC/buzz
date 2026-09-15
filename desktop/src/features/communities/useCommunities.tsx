@@ -17,7 +17,11 @@ import {
   saveActiveCommunityId,
   saveCommunities,
 } from "./communityStorage";
-import { startDntlsConnector } from "./dntlsConnector";
+import {
+  isCredentialsChangedError,
+  requestDntlsCredentialsRecovery,
+  startDntlsConnector,
+} from "./dntlsConnector";
 import { removeSelfProfileCachesForRelay } from "@/features/profile/lib/selfProfileStorage";
 import { removeUserLabelCacheForRelay } from "@/features/profile/lib/userLabelStorage";
 import { removeChannelSnapshotForRelay } from "@/features/channels/channelSnapshot";
@@ -152,6 +156,8 @@ export type UseCommunitiesReturn = {
       Pick<Community, "name" | "relayUrl" | "token" | "pubkey" | "reposDir">
     >,
   ) => UpdateCommunityResult;
+  /** Re-dial DNTLS connectors after credentials are replaced. */
+  retryDntlsConnectors: () => Promise<boolean>;
   /** Persist a new display order for the rail. IDs not in orderedIds keep their relative position at the end. */
   reorderCommunities: (orderedIds: string[]) => void;
 };
@@ -185,17 +191,18 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
   const communitiesRef = useRef(communities);
   communitiesRef.current = communities;
 
-  useEffect(() => {
-    let cancelled = false;
-    for (const community of communitiesRef.current) {
-      if (!community.dntlsName) continue;
-      void startDntlsConnector(community.dntlsName)
-        .then((ready) => {
-          if (cancelled) return;
+  const restoreDntlsConnectors = useCallback(
+    async (announceRecovery: boolean) => {
+      let needsRecovery = false;
+      for (const community of communitiesRef.current) {
+        if (!community.dntlsName) continue;
+        try {
+          const ready = await startDntlsConnector(community.dntlsName);
           setCommunitiesState((previous) => {
             const current = previous.find((item) => item.id === community.id);
-            if (!current || current.relayUrl === ready.relayUrl)
+            if (!current || current.relayUrl === ready.relayUrl) {
               return previous;
+            }
             const next = previous.map((item) =>
               item.id === community.id
                 ? {
@@ -211,18 +218,33 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
           if (community.id === activeId) {
             setReinitKey((key) => key + 1);
           }
-        })
-        .catch((error) => {
+        } catch (error) {
+          if (isCredentialsChangedError(error)) {
+            needsRecovery = true;
+            break;
+          }
           console.warn(
             `Failed to restore DNTLS community ${community.dntlsName}`,
             error,
           );
-        });
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, [activeId]);
+        }
+      }
+      if (needsRecovery && announceRecovery) {
+        requestDntlsCredentialsRecovery();
+      }
+      return needsRecovery;
+    },
+    [activeId],
+  );
+
+  useEffect(() => {
+    void restoreDntlsConnectors(true);
+  }, [restoreDntlsConnectors]);
+
+  const retryDntlsConnectors = useCallback(
+    () => restoreDntlsConnectors(false),
+    [restoreDntlsConnectors],
+  );
 
   const activeCommunity = useMemo(
     () => communities.find((w) => w.id === activeId) ?? communities[0] ?? null,
@@ -384,6 +406,7 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
     switchCommunity,
     reconnectCommunity,
     updateCommunity,
+    retryDntlsConnectors,
     reorderCommunities,
   };
 }

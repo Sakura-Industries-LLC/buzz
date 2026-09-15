@@ -383,15 +383,15 @@ export function CommunityOnboardingFlow({
       } else if (transaction.dntlsName) {
         const status = await dntlsCredentialsStatus().catch(() => null);
         if (!isCurrent()) return "pending";
-        const userName = status?.user_name;
-        if (!userName) {
+        const connectedName = status?.name?.trim();
+        if (!connectedName) {
           if (!isCurrent()) return "pending";
           update({ stage: "profile", error: undefined }, transaction.id);
           setIsAwaitingApproval(false);
           return "continue";
         }
         try {
-          await updateProfile({ displayName: userName });
+          await updateProfile({ displayName: connectedName });
         } catch (error) {
           const view = membershipGateViewForError(error);
           if (view === "membership-denied") return "denied";
@@ -446,10 +446,10 @@ export function CommunityOnboardingFlow({
       }
       if (!transaction.dntlsName) return;
       const status = await dntlsCredentialsStatus().catch(() => null);
-      const userName = status?.user_name;
-      if (!userName) return;
+      const connectedName = status?.name?.trim();
+      if (!connectedName) return;
       try {
-        await updateProfile({ displayName: userName });
+        await updateProfile({ displayName: connectedName });
       } catch (error) {
         if (await routeMembershipError(error)) {
           awaitingResumeRef.current = "dntls-skip";
@@ -457,7 +457,7 @@ export function CommunityOnboardingFlow({
         }
         // Publishing failed for another reason: fall through to the manual
         // step, seeded with the name so the user only has to confirm.
-        setDisplayName((prev) => (prev === "" ? userName : prev));
+        setDisplayName((prev) => (prev === "" ? connectedName : prev));
         return;
       }
       skipToTeam();

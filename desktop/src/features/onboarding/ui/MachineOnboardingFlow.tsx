@@ -12,7 +12,10 @@ import {
   dntlsCredentialsStatus,
   needsCredentialsImport,
 } from "@/features/communities/dntlsConnector";
-import { DntlsIdentityPicker } from "@/features/communities/ui/DntlsIdentityPicker";
+import {
+  DNTLS_CONNECT_TITLE,
+  DntlsCredentialCodeForm,
+} from "@/features/communities/ui/DntlsCredentialCodeForm";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -540,14 +543,11 @@ export function MachineOnboardingFlow({
               transitionKey={`machine-dntls-${transitionDirection}`}
             >
               <h1 className="text-title font-normal text-foreground">
-                Choose your DNTLS name
+                {DNTLS_CONNECT_TITLE}
               </h1>
-              <p className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
-                Buzz will use this name when you join DNTLS communities.
-              </p>
               <div className="mt-8 w-full max-w-[500px] text-left">
-                <DntlsIdentityPicker
-                  onBound={() => {
+                <DntlsCredentialCodeForm
+                  onConnected={() => {
                     setTransitionDirection("forward");
                     setPage(dntlsContinuePage);
                   }}

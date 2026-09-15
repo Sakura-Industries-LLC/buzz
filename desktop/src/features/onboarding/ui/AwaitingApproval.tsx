@@ -42,7 +42,7 @@ export function AwaitingApproval({
     void dntlsCredentialsStatus()
       .then((status) => {
         if (cancelled) return;
-        const name = status.user_name?.trim() || status.name?.trim() || null;
+        const name = status.name?.trim() || null;
         setApplicantName(name);
       })
       .catch(() => {

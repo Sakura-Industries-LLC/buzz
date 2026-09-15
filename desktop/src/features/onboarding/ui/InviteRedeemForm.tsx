@@ -16,19 +16,18 @@ import { normalizeRelayUrl } from "@/features/communities/relayProbe";
 import {
   dntlsCommunityName,
   dntlsCredentialsStatus,
+  isCredentialsChangedError,
+  isDntlsError,
   needsCredentialsImport,
   startDntlsConnector,
 } from "@/features/communities/dntlsConnector";
-import { DntlsIdentityPicker } from "@/features/communities/ui/DntlsIdentityPicker";
+import {
+  DNTLS_CREDENTIALS_CHANGED_COPY,
+  DntlsCredentialCodeDialog,
+} from "@/features/communities/ui/DntlsCredentialCodeForm";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-} from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { JoinPolicyNotice } from "./JoinPolicyNotice";
@@ -99,6 +98,7 @@ export function InviteRedeemForm({
   const [policyError, setPolicyError] = React.useState<string | null>(null);
   const [isLoadingPolicy, setIsLoadingPolicy] = React.useState(false);
   const [pickerOpen, setPickerOpen] = React.useState(false);
+  const [codeNotice, setCodeNotice] = React.useState<string | null>(null);
   const shouldReduceMotion = useReducedMotion();
 
   const isAddCommunity = variant === "add-community";
@@ -208,7 +208,16 @@ export function InviteRedeemForm({
 
         onConnect?.(relayWsUrl, ready?.community);
       } catch (policyFetchError) {
-        setPolicyError(inviteErrorMessage(policyFetchError));
+        if (isCredentialsChangedError(policyFetchError)) {
+          setCodeNotice(DNTLS_CREDENTIALS_CHANGED_COPY);
+          setPickerOpen(true);
+          return;
+        }
+        setPolicyError(
+          isDntlsError(policyFetchError)
+            ? policyFetchError.message
+            : inviteErrorMessage(policyFetchError),
+        );
       } finally {
         setIsLoadingPolicy(false);
       }
@@ -235,6 +244,7 @@ export function InviteRedeemForm({
             missing = true;
           }
           if (missing) {
+            setCodeNotice(null);
             setPickerOpen(true);
             return;
           }
@@ -591,29 +601,19 @@ export function InviteRedeemForm({
           </>
         )}
       </form>
-      <Dialog
+      <DntlsCredentialCodeDialog
+        initialNotice={codeNotice}
+        onConnected={() => {
+          setPickerOpen(false);
+          setCodeNotice(null);
+          if (dntlsName) void connectNativeRelay(dntlsName);
+        }}
         onOpenChange={(open) => {
-          if (!open) setPickerOpen(false);
+          setPickerOpen(open);
+          if (!open) setCodeNotice(null);
         }}
         open={pickerOpen}
-      >
-        <DialogContent
-          className="max-w-lg"
-          data-testid="dntls-identity-picker-dialog"
-        >
-          <DialogTitle>Choose your DNTLS name</DialogTitle>
-          <DialogDescription>
-            Buzz will use this name when you join DNTLS communities.
-          </DialogDescription>
-          <DntlsIdentityPicker
-            onBound={() => {
-              setPickerOpen(false);
-              if (dntlsName) void connectNativeRelay(dntlsName);
-            }}
-            onCancel={() => setPickerOpen(false)}
-          />
-        </DialogContent>
-      </Dialog>
+      />
     </>
   );
 }
