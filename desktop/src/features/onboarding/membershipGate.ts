@@ -13,17 +13,19 @@ import { isDntlsApprovalPendingReason } from "@/shared/api/relayAuthPolicy";
 export type MembershipGateView = "awaiting-approval" | "membership-denied";
 
 export function isDntlsApprovalPendingError(error: unknown): boolean {
-  return error instanceof Error && isDntlsApprovalPendingReason(error.message);
+  const message = error instanceof Error ? error.message : error;
+  return typeof message === "string" && isDntlsApprovalPendingReason(message);
 }
 
 export function isRelayMembershipDeniedError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
+  const message = error instanceof Error ? error.message : error;
+  if (typeof message !== "string") return false;
   if (isDntlsApprovalPendingError(error)) return false;
   return (
-    error.message.includes("You must be a relay member") ||
-    error.message.includes("relay_membership_required") ||
-    error.message.includes("restricted: not a relay member") ||
-    error.message.includes("invalid: you are not a relay member")
+    message.includes("You must be a relay member") ||
+    message.includes("relay_membership_required") ||
+    message.includes("restricted: not a relay member") ||
+    message.includes("invalid: you are not a relay member")
   );
 }
 

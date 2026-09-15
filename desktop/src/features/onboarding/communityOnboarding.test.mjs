@@ -279,6 +279,37 @@ test("resolveProfileCheckAction_fetchRejects_returnsShowProfile", async () => {
   assert.equal(result.action, "show-profile");
 });
 
+test("resolveProfileCheckAction_pendingAdmission_returnsAdmissionError", async () => {
+  const result = await resolveProfileCheckAction(
+    () => Promise.reject(new Error("restricted: dntls approval pending")),
+    10_000,
+    makeScheduler().schedule,
+  );
+  assert.equal(result.action, "admission-error");
+  assert.equal(result.error, "restricted: dntls approval pending");
+});
+
+test("resolveProfileCheckAction_httpPendingAdmission_returnsAdmissionError", async () => {
+  const result = await resolveProfileCheckAction(
+    () =>
+      Promise.reject(new Error("relay returned 403: dntls_approval_pending")),
+    10_000,
+    makeScheduler().schedule,
+  );
+  assert.equal(result.action, "admission-error");
+  assert.equal(result.error, "relay returned 403: dntls_approval_pending");
+});
+
+test("resolveProfileCheckAction_membershipDenied_returnsAdmissionError", async () => {
+  const result = await resolveProfileCheckAction(
+    () => Promise.reject(new Error("restricted: not a relay member")),
+    10_000,
+    makeScheduler().schedule,
+  );
+  assert.equal(result.action, "admission-error");
+  assert.equal(result.error, "restricted: not a relay member");
+});
+
 test("resolveProfileCheckAction_timeout_returnsShowProfile", async () => {
   // Fetch never settles; scheduler fires the timeout immediately.
   const scheduler = makeScheduler();

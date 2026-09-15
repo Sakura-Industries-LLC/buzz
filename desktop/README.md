@@ -8,6 +8,16 @@ Desktop chat shell with:
 - Biome (lint/format/check)
 - Feature-driven frontend structure
 
+## Joining a DNTLS community
+
+Communities that require admin approval show **Waiting for approval** before
+profile setup. Buzz checks again about every five seconds. Once approved, it
+publishes your verified DNTLS name and opens the community automatically.
+An admin rejection shows **Not a member yet** instead.
+
+Pending approval responses during profile lookup, publishing, or other
+onboarding requests return to the same waiting screen.
+
 ## Scripts
 
 - `pnpm dev` - run the web frontend
@@ -17,6 +27,15 @@ Desktop chat shell with:
 - `pnpm lint` - Biome lint
 - `pnpm format` - Biome format (write)
 - `pnpm check` - Biome check
+
+The admission regression scenarios use the desktop frontend with mocked native
+commands and relay responses:
+
+```sh
+pnpm build:e2e
+pnpm exec playwright install chromium
+pnpm exec playwright test --project=integration tests/e2e/dntls-onboarding-approval.spec.ts
+```
 
 ## Structure
 

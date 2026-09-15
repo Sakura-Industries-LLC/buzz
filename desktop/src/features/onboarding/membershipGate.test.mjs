@@ -38,13 +38,15 @@ test("ordinary membership denial is terminal", () => {
   }
 });
 
-test("pending then generic denial switches the gate to MembershipDenied", () => {
+test("serialized onboarding errors retain their membership gate", () => {
   assert.equal(
-    membershipGateViewForError(new Error("restricted: dntls approval pending")),
+    membershipGateViewForError(
+      "relay returned 403 Forbidden: dntls_approval_pending",
+    ),
     "awaiting-approval",
   );
   assert.equal(
-    membershipGateViewForError(new Error("restricted: not a relay member")),
+    membershipGateViewForError("restricted: not a relay member"),
     "membership-denied",
   );
 });
@@ -55,7 +57,7 @@ test("unrelated errors do not open a membership gate", () => {
     null,
   );
   assert.equal(
-    membershipGateViewForError("restricted: not a relay member"),
+    membershipGateViewForError("relay returned 403 Forbidden: forbidden"),
     null,
   );
 });

@@ -11,7 +11,8 @@ import type {
   ProjectRepoSyncStatus,
   RelayEvent,
 } from "@/shared/api/types";
-import { invokeTauri, TauriInvokeError } from "@/shared/api/tauri";
+import { invokeTauri } from "@/shared/api/tauri";
+import { TauriInvokeError } from "@/shared/api/tauriErrors";
 
 type RawProjectRepoCommit = {
   hash: string;

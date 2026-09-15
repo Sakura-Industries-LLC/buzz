@@ -28,7 +28,8 @@ import { getProfile, updateProfile } from "@/shared/api/tauriProfiles";
 import { getIdentity, importIdentity } from "@/shared/api/tauriIdentity";
 import { listPersonas } from "@/shared/api/tauriPersonas";
 import { relayClient } from "@/shared/api/relayClient";
-import type { AgentPersona } from "@/shared/api/types";
+import { subscribeToTauriErrors } from "@/shared/api/tauriErrors";
+import type { AgentPersona, Profile } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
@@ -260,11 +261,27 @@ export function CommunityOnboardingFlow({
     markCommunityOnboardingComplete(identity.pubkey, relayUrl);
     clear();
   }, [clear, relayUrl]);
+  const routeMembershipError = React.useCallback(async (error: unknown) => {
+    const view = membershipGateViewForError(error);
+    if (view == null) return false;
+    setIsMembershipDenied(view === "membership-denied");
+    setIsAwaitingApproval(view === "awaiting-approval");
+    setIsAvatarEditorOpen(false);
+    const identity = await getIdentity().catch(() => null);
+    setDeniedPubkey(identity?.pubkey ?? "");
+    return true;
+  }, []);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only the current transaction owns in-flight HTTP failures.
+  React.useLayoutEffect(() => {
+    if (!transaction?.id) return;
+    return subscribeToTauriErrors((error) => void routeMembershipError(error));
+  }, [routeMembershipError, transaction?.id, transaction?.relayUrl]);
   const finalize = React.useCallback(async () => {
     if (isPending || !relayUrl) return;
     setIsPending(true);
     update({ stage: "finalizing", error: undefined });
     try {
+      await relayClient.preconnect();
       const identity = await getIdentity();
       const result = await initializeStarterChannels(queryClient, {
         focus: true,
@@ -282,18 +299,24 @@ export function CommunityOnboardingFlow({
         markCommunityOnboardingComplete(identity.pubkey, relayUrl);
         // Keep this screen mounted as a curtain over the loading app; the
         // "entering" stage fades it out once Welcome reports ready.
+        setIsAwaitingApproval(false);
         update({ stage: "entering", error: undefined });
         return;
       }
       await finish();
     } catch (error) {
+      if (await routeMembershipError(error)) {
+        setIsPending(false);
+        return;
+      }
+      setIsAwaitingApproval(false);
       setStarterChannelFailureCount((count) => count + 1);
       update({
         error: error instanceof Error ? error.message : String(error),
       });
       setIsPending(false);
     }
-  }, [finish, isPending, queryClient, relayUrl, update]);
+  }, [finish, isPending, queryClient, relayUrl, routeMembershipError, update]);
 
   const backToProfile = React.useCallback(() => {
     if (isPending) return;
@@ -303,15 +326,6 @@ export function CommunityOnboardingFlow({
   }, [isPending, update]);
 
   const isProfileStage = transaction?.stage === "profile";
-  const routeMembershipError = React.useCallback(async (error: unknown) => {
-    const view = membershipGateViewForError(error);
-    if (view == null) return false;
-    const identity = await getIdentity().catch(() => null);
-    setDeniedPubkey(identity?.pubkey ?? "");
-    setIsMembershipDenied(view === "membership-denied");
-    setIsAwaitingApproval(view === "awaiting-approval");
-    return true;
-  }, []);
   const publishProfileDraft = React.useCallback(
     async (targetRelayUrl: string) => {
       const candidateAvatarUrl = avatarUrl.trim();
@@ -346,6 +360,16 @@ export function CommunityOnboardingFlow({
   const tryEnterAfterApproval = React.useCallback(
     async (isCurrent: () => boolean) => {
       if (!transaction) return "pending";
+      try {
+        await relayClient.preconnect();
+        if (!isCurrent()) return "pending";
+        await getProfile();
+      } catch (error) {
+        return membershipGateViewForError(error) === "membership-denied"
+          ? "denied"
+          : "pending";
+      }
+      if (!isCurrent()) return "pending";
       if (awaitingResumeRef.current === "save-profile") {
         const name = displayName.trim();
         if (!name) return "pending";
@@ -358,9 +382,11 @@ export function CommunityOnboardingFlow({
         }
       } else if (transaction.dntlsName) {
         const status = await dntlsCredentialsStatus().catch(() => null);
+        if (!isCurrent()) return "pending";
         const userName = status?.user_name;
         if (!userName) {
           if (!isCurrent()) return "pending";
+          update({ stage: "profile", error: undefined }, transaction.id);
           setIsAwaitingApproval(false);
           return "continue";
         }
@@ -373,16 +399,18 @@ export function CommunityOnboardingFlow({
         }
       } else {
         if (!isCurrent()) return "pending";
+        update({ stage: "profile", error: undefined }, transaction.id);
         setIsAwaitingApproval(false);
         return "continue";
       }
       if (!isCurrent()) return "pending";
+      update({ error: undefined }, transaction.id);
       setIsAwaitingApproval(false);
       setTransitionDirection("forward");
       await finalize();
-      return "continue";
+      return "pending";
     },
-    [displayName, publishProfileDraft, transaction, finalize],
+    [displayName, publishProfileDraft, transaction, finalize, update],
   );
   const approvalAttemptRef = React.useRef(tryEnterAfterApproval);
   React.useEffect(() => {
@@ -401,9 +429,11 @@ export function CommunityOnboardingFlow({
       update({ stage: "team-intro", error: undefined }, transaction.id);
     };
     void (async () => {
-      let profile = null;
+      let profile: Profile | null = null;
       try {
         profile = await getProfile();
+        setDisplayName((prev) => prev || profile?.displayName || "");
+        setAvatarUrl((prev) => prev || profile?.avatarUrl || "");
       } catch (error) {
         if (await routeMembershipError(error)) {
           awaitingResumeRef.current = "dntls-skip";
@@ -437,30 +467,6 @@ export function CommunityOnboardingFlow({
     transaction?.stage === "team-intro" ||
     transaction?.stage === "finalizing" ||
     transaction?.stage === "entering";
-
-  // Seed display name and avatar from the relay profile when the profile step
-  // is shown. This covers the case where the skip raced or was bypassed (e.g.,
-  // the user navigated Back). Only seeds fields that are still empty so that
-  // any user edits are preserved.
-  React.useEffect(() => {
-    if (!isProfileStage) return;
-    void getProfile()
-      .then((profile) => {
-        if (profile.displayName) {
-          setDisplayName((prev) =>
-            prev === "" ? (profile.displayName ?? "") : prev,
-          );
-        }
-        if (profile.avatarUrl) {
-          setAvatarUrl((prev) =>
-            prev === "" ? (profile.avatarUrl ?? "") : prev,
-          );
-        }
-      })
-      .catch(() => {
-        // Seeding is best-effort; silently ignore failures.
-      });
-  }, [isProfileStage]);
 
   React.useLayoutEffect(() => {
     if (isProfileStage && !isAvatarEditorOpen) {
@@ -498,6 +504,16 @@ export function CommunityOnboardingFlow({
       setIsMembershipDenied(false);
     }
   }, [transaction?.stage]);
+  React.useEffect(() => {
+    if (!transaction?.error) return;
+    if (
+      transaction.stage === "connecting" ||
+      transaction.stage === "claiming"
+    ) {
+      awaitingResumeRef.current = "dntls-skip";
+    }
+    void routeMembershipError(transaction.error);
+  }, [routeMembershipError, transaction?.error, transaction?.stage]);
 
   const approvalTransactionId = transaction?.id;
   const approvalRelayUrl = transaction?.relayUrl;
@@ -512,29 +528,6 @@ export function CommunityOnboardingFlow({
       setIsAwaitingApproval(false);
       setIsMembershipDenied(true);
     };
-    const resume = () => {
-      if (cancelled) return;
-      void approvalAttemptRef
-        .current(() => !cancelled)
-        .then((result) => {
-          if (cancelled) return;
-          if (result === "denied") showDenied();
-        });
-    };
-    const classifyError = (error: unknown) => {
-      if (membershipGateViewForError(error) === "membership-denied") {
-        showDenied();
-      }
-    };
-
-    void relayClient.preconnect().catch(classifyError);
-    const unsub = relayClient.subscribeToConnectionState((state) => {
-      if (cancelled) return;
-      if (state === "connected") resume();
-      if (state === "disconnected") {
-        void relayClient.preconnect().catch(classifyError);
-      }
-    });
     const stop = startAwaitingApprovalRetry({
       attempt: () => approvalAttemptRef.current(() => !cancelled),
       onContinue: () => {},
@@ -543,7 +536,6 @@ export function CommunityOnboardingFlow({
 
     return () => {
       cancelled = true;
-      unsub();
       stop();
     };
   }, [isAwaitingApproval, approvalTransactionId, approvalRelayUrl]);

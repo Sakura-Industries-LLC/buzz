@@ -6,6 +6,7 @@ import {
   useUpdateProfileMutation,
 } from "@/features/profile/hooks";
 import { relayClient } from "@/shared/api/relayClient";
+import { subscribeToTauriErrors } from "@/shared/api/tauriErrors";
 import { getMyRelayMembershipLookup } from "@/shared/api/relayMembers";
 import { isRelayUnreachableError } from "@/shared/lib/relayError";
 import { startAwaitingApprovalRetry } from "@/features/onboarding/awaitingApprovalRetry";
@@ -193,6 +194,26 @@ export function OnboardingFlow({
   const [transitionDirection, setTransitionDirection] =
     React.useState<OnboardingTransitionDirection>("forward");
   const systemColorScheme = useSystemColorScheme();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: changing community cancels ownership of in-flight command errors.
+  React.useLayoutEffect(
+    () =>
+      subscribeToTauriErrors((error) => {
+        const view = membershipGateViewForError(error);
+        if (!view) return;
+        void getIdentity()
+          .then((identity) => setDeniedPubkey(identity.pubkey))
+          .catch(() => {});
+        if (
+          currentPage !== "awaiting-approval" &&
+          currentPage !== "membership-denied"
+        ) {
+          setDeniedFromPage(currentPage);
+          setMembershipRetryPage(currentPage);
+        }
+        setCurrentPage(view);
+      }),
+    [activeCommunity?.id, activeCommunity?.relayUrl, currentPage],
+  );
 
   const resetProfileSaveError = React.useCallback(() => {
     profileUpdateMutation.reset();
@@ -346,24 +367,22 @@ export function OnboardingFlow({
       if (!cancelled) setCurrentPage("membership-denied");
     };
     const resume = () => {
-      if (!cancelled) void resumeApprovalRef.current("complete");
-    };
-    const classifyError = (error: unknown) => {
-      if (membershipGateViewForError(error) === "membership-denied") {
-        showDenied();
-      }
-    };
-
-    void relayClient.preconnect().catch(classifyError);
-    const unsub = relayClient.subscribeToConnectionState((state) => {
       if (cancelled) return;
-      if (state === "connected") resume();
-      if (state === "disconnected") {
-        void relayClient.preconnect().catch(classifyError);
+      if (!profileDraft.displayName.trim()) {
+        setCurrentPage("profile");
+        return;
       }
-    });
+      void resumeApprovalRef.current("complete");
+    };
     const stop = startAwaitingApprovalRetry({
       attempt: async () => {
+        try {
+          await relayClient.preconnect();
+        } catch (error) {
+          return membershipGateViewForError(error) === "membership-denied"
+            ? "denied"
+            : "pending";
+        }
         const status = await checkMembershipStatus();
         if (status === "ok") return "continue";
         if (status === "denied") return "denied";
@@ -375,10 +394,14 @@ export function OnboardingFlow({
 
     return () => {
       cancelled = true;
-      unsub();
       stop();
     };
-  }, [activeCommunity?.id, activeCommunity?.relayUrl, currentPage]);
+  }, [
+    activeCommunity?.id,
+    activeCommunity?.relayUrl,
+    currentPage,
+    profileDraft.displayName,
+  ]);
 
   const updateDisplayNameDraft = React.useCallback(
     (value: string) => {
@@ -540,6 +563,10 @@ export function OnboardingFlow({
           onChangeCommunity={() => setIsCommunityChangeOpen(true)}
           onImportKey={importExistingKey}
           onRetry={() => {
+            if (!profileDraft.displayName.trim()) {
+              setCurrentPage("profile");
+              return;
+            }
             void saveProfileAndContinue(membershipRetryPage);
           }}
           pubkey={deniedPubkey}

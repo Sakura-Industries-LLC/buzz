@@ -6532,6 +6532,17 @@ async function handleGetChannels(
 }
 
 async function handleGetProfile(config: E2eConfig | undefined) {
+  const profileReadDelayMs = config?.mock?.profileReadDelayMs ?? 0;
+  if (profileReadDelayMs > 0) {
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, profileReadDelayMs);
+    });
+  }
+
+  const profileReadError = config?.mock?.profileReadError;
+  if (profileReadError) {
+    throw new Error(profileReadError);
+  }
   const identity = getIdentity(config);
   const forcedHasProfileEvent = config?.mock?.profileHasEvent;
   if (forcedHasProfileEvent !== undefined) {
@@ -6541,18 +6552,6 @@ async function handleGetProfile(config: E2eConfig | undefined) {
     };
   }
   if (!identity) {
-    const profileReadDelayMs = config?.mock?.profileReadDelayMs ?? 0;
-    if (profileReadDelayMs > 0) {
-      await new Promise<void>((resolve) => {
-        window.setTimeout(resolve, profileReadDelayMs);
-      });
-    }
-
-    const profileReadError = config?.mock?.profileReadError;
-    if (profileReadError) {
-      throw new Error(profileReadError);
-    }
-
     return cloneProfile(ensureMockProfile(config));
   }
 
@@ -6592,22 +6591,21 @@ async function handleUpdateProfile(
   },
   config: E2eConfig | undefined,
 ) {
+  const profileUpdateError = config?.mock?.profileUpdateError;
+  const profileUpdateErrors = config?.mock?.profileUpdateErrors;
+  const nextProfileUpdateError = profileUpdateErrors?.shift();
+  if (nextProfileUpdateError) {
+    throw new Error(nextProfileUpdateError);
+  }
+
+  if (profileUpdateError) {
+    if (config?.mock) {
+      config.mock.profileUpdateError = undefined;
+    }
+    throw new Error(profileUpdateError);
+  }
   const identity = getIdentity(config);
   if (!identity) {
-    const profileUpdateError = config?.mock?.profileUpdateError;
-    const profileUpdateErrors = config?.mock?.profileUpdateErrors;
-    const nextProfileUpdateError = profileUpdateErrors?.shift();
-    if (nextProfileUpdateError) {
-      throw new Error(nextProfileUpdateError);
-    }
-
-    if (profileUpdateError) {
-      if (config?.mock) {
-        config.mock.profileUpdateError = undefined;
-      }
-      throw new Error(profileUpdateError);
-    }
-
     const profile = ensureMockProfile(config);
     const hasDisplayNameUpdate = typeof args.displayName === "string";
     const hasAvatarUrlUpdate = typeof args.avatarUrl === "string";
