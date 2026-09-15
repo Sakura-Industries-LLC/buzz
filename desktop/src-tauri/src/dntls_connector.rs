@@ -124,9 +124,7 @@ pub(crate) async fn start_dntls_connector(
         .running
         .lock()
         .map_err(|_| "DNTLS connector state is unavailable".to_string())?;
-    let task = tauri::async_runtime::spawn(accept_loop(
-        app, listener, community.clone(), verified,
-    ));
+    let task = tauri::async_runtime::spawn(accept_loop(app, listener, community.clone(), verified));
     running.insert(
         community,
         RunningConnector {
@@ -153,7 +151,10 @@ fn lookup(
 async fn discover_with_refresh(app: &AppHandle, community: &str) -> Result<Verified, DntlsError> {
     let path = credentials_bundle_path(app)?;
     if !path.is_file() {
-        return Err(DntlsError::new("credentials_changed", "Connect your DNTLS name before adding this community."));
+        return Err(DntlsError::new(
+            "credentials_changed",
+            "Connect your DNTLS name before adding this community.",
+        ));
     }
     let data_dir = credentials_data_dir(app)?;
     let (resolver, handshaker) = clients(&path, data_dir.clone())?;
@@ -161,24 +162,24 @@ async fn discover_with_refresh(app: &AppHandle, community: &str) -> Result<Verif
         Ok(verified) => return Ok(verified),
         Err(error) => error,
     };
-    let data = zeroize::Zeroizing::new(std::fs::read(&path)
-        .map_err(|error| format!("read DNTLS credentials: {error}"))?);
+    let data = zeroize::Zeroizing::new(
+        std::fs::read(&path).map_err(|error| format!("read DNTLS credentials: {error}"))?,
+    );
     let credentials = identity::decode_credentials(&data)
         .map_err(|_| "Stored credentials are not a valid DNTLS bundle.".to_string())?;
-    let certificate = credentials.tls_certificate(None, time::Duration::ZERO)
+    let certificate = credentials
+        .tls_certificate(None, time::Duration::ZERO)
         .map_err(|error| error.to_string())?;
     let freshness = identity::verify_certificate(resolver.as_ref(), certificate.der(), None).await;
-    if !matches!(&freshness, Err(error) if error.classification() == Some(identity::Classification::CertificateUnverified)) {
+    if !matches!(&freshness, Err(error) if error.classification() == Some(identity::Classification::CertificateUnverified))
+    {
         return Err(failure.into());
     }
-    if let Err(error) = refresh_credentials(&path, &credentials).await {
-        if error.code == "credentials_changed" {
-            let _ = app.emit("dntls-credentials-changed", ());
-        }
-        return Err(error);
-    }
+    refresh_credentials(&path, &credentials).await?;
     let (resolver, handshaker) = clients(&path, data_dir)?;
-    discover(community, resolver, handshaker).await.map_err(Into::into)
+    discover(community, resolver, handshaker)
+        .await
+        .map_err(Into::into)
 }
 
 /// Loads the stored credential bundle and builds the resolver client for
@@ -188,7 +189,9 @@ fn clients(
     bundle: &std::path::Path,
     data_dir: std::path::PathBuf,
 ) -> Result<(Arc<resolver::Client>, tls::Handshaker), String> {
-    let data = std::fs::read(bundle).map_err(|error| format!("read DNTLS credentials: {error}"))?;
+    let data = zeroize::Zeroizing::new(
+        std::fs::read(bundle).map_err(|error| format!("read DNTLS credentials: {error}"))?,
+    );
     let credentials = identity::decode_credentials(&data)
         .map_err(|error| format!("decode DNTLS credentials: {error}"))?;
     let endpoint = credentials
@@ -260,11 +263,15 @@ async fn discover(
                 continue;
             }
         };
-        match probe(community, addr, &handshaker, &relay_key).await {
-            Ok(()) => {
-                return Ok(Verified { addr, handshaker });
-            }
-            Err(error) => failures.push(format!("{addr}: {error}")),
+        match tokio::time::timeout(
+            DIAL_TIMEOUT,
+            probe(community, addr, &handshaker, &relay_key),
+        )
+        .await
+        {
+            Ok(Ok(())) => return Ok(Verified { addr, handshaker }),
+            Ok(Err(error)) => failures.push(format!("{addr}: {error}")),
+            Err(_) => failures.push(format!("{addr}: community response timed out")),
         }
     }
     Err(format!(
@@ -420,6 +427,9 @@ async fn accept_loop(app: AppHandle, listener: TcpListener, community: String, v
                     let updated = match discover_with_refresh(&app, &community).await {
                         Ok(updated) => updated,
                         Err(error) => {
+                            if error.code == "credentials_changed" {
+                                let _ = app.emit("dntls-credentials-changed", ());
+                            }
                             eprintln!("buzz-desktop: DNTLS connection unavailable: {}", error.code);
                             return;
                         }
@@ -435,11 +445,18 @@ async fn accept_loop(app: AppHandle, listener: TcpListener, community: String, v
             // TLS 1.3 can report a refused client certificate on the first read,
             // after connect returns. Refresh for the next connection; never replay
             // application bytes that may already have reached the community.
-            if tokio::io::copy_bidirectional(&mut local, &mut remote).await.is_err() {
+            if tokio::io::copy_bidirectional(&mut local, &mut remote)
+                .await
+                .is_err()
+            {
                 let state = app.state::<DntlsConnectors>();
                 let _guard = state.operation.lock().await;
-                if let Ok(updated) = discover_with_refresh(&app, &community).await {
-                    *verified.write().await = updated;
+                match discover_with_refresh(&app, &community).await {
+                    Ok(updated) => *verified.write().await = updated,
+                    Err(error) if error.code == "credentials_changed" => {
+                        let _ = app.emit("dntls-credentials-changed", ());
+                    }
+                    Err(_) => {}
                 }
             }
         });

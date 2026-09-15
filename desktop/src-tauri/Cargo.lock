@@ -2711,7 +2711,7 @@ dependencies = [
 [[package]]
 name = "dntls-testnet-sdk"
 version = "0.0.0"
-source = "git+https://github.com/Sakura-Industries-LLC/dntls-testnet?rev=7a722b9cf756e2f66af8576c3aaa1c3a583e8a82#7a722b9cf756e2f66af8576c3aaa1c3a583e8a82"
+source = "git+https://github.com/Sakura-Industries-LLC/dntls-testnet?rev=3700e413fc8608ac85def8cb85b809b110b1e15e#3700e413fc8608ac85def8cb85b809b110b1e15e"
 dependencies = [
  "base64 0.22.1",
  "bech32 0.12.0",
@@ -2729,6 +2729,7 @@ dependencies = [
  "mime",
  "parking_lot",
  "rcgen",
+ "regress",
  "reqwest 0.13.4",
  "rustls",
  "serde",
@@ -8980,6 +8981,16 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "regress"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "158a764437582235e3501f683b93a0a6f8d825d04a789dbe5ed30b8799b8908a"
+dependencies = [
+ "hashbrown 0.16.1",
+ "memchr",
+]
 
 [[package]]
 name = "reqwest"

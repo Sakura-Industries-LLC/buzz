@@ -144,7 +144,7 @@ export async function startDntlsConnector(
 
 /** Return the stored DNTLS identity name, if a credentials file is present. */
 export function dntlsCredentialsStatus(): Promise<DntlsCredentialsStatus> {
-  return invoke<DntlsCredentialsStatus>("dntls_credentials_status");
+  return invokeDntls<DntlsCredentialsStatus>("dntls_credentials_status");
 }
 
 /**
@@ -159,7 +159,7 @@ export function redeemDntlsCredentialCode(
 
 /** Delete the stored credentials file. */
 export function removeDntlsCredentials(): Promise<void> {
-  return invoke("remove_dntls_credentials");
+  return invokeDntls("remove_dntls_credentials");
 }
 
 /** Ask the shared recovery UI to collect a new one-time code. */

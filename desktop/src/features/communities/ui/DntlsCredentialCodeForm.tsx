@@ -20,10 +20,8 @@ export const DNTLS_CODE_INSTRUCTION =
   "Paste the one-time code from your name's page in the DNTLS Portal (EXPORT → Export one-time code).";
 export const DNTLS_CODE_INVALID_COPY =
   "That code is not valid. Codes work once and expire; export a new one.";
-export const DNTLS_CODE_RATE_LIMITED_COPY =
-  "Too many attempts, wait a minute.";
-export const DNTLS_CREDENTIALS_CHANGED_COPY =
-  DNTLS_CREDENTIALS_CHANGED_MESSAGE;
+export const DNTLS_CODE_RATE_LIMITED_COPY = "Too many attempts, wait a minute.";
+export const DNTLS_CREDENTIALS_CHANGED_COPY = DNTLS_CREDENTIALS_CHANGED_MESSAGE;
 export const DNTLS_CODE_UNAVAILABLE_COPY =
   "Couldn't reach the DNTLS Portal. Try again.";
 
@@ -46,6 +44,7 @@ export function DntlsCredentialCodeForm({
   onConnected,
   onSkip,
 }: FormProps) {
+  const inputId = React.useId();
   const [code, setCode] = React.useState("");
   const [error, setError] = React.useState<string | null>(initialNotice);
   const [busy, setBusy] = React.useState(false);
@@ -124,7 +123,7 @@ export function DntlsCredentialCodeForm({
           void handleConnect();
         }}
       >
-        <label className="flex flex-col gap-1.5 text-left">
+        <label className="flex flex-col gap-1.5 text-left" htmlFor={inputId}>
           <span className="sr-only">One-time code</span>
           <Input
             autoCapitalize="none"
@@ -132,6 +131,7 @@ export function DntlsCredentialCodeForm({
             autoCorrect="off"
             className="h-10 bg-background font-mono tracking-wide"
             data-testid="dntls-credential-code-input"
+            id={inputId}
             disabled={busy}
             onChange={(event) => {
               setCode(event.target.value);

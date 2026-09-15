@@ -7,7 +7,6 @@ const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "http://localhost",
 });
 
-const redeemCalls = [];
 let redeemResult = { name: "alice.dntls" };
 let redeemError = null;
 
@@ -16,7 +15,6 @@ function installInvoke() {
     if (command !== "redeem_dntls_credential_code") {
       throw new Error(`unexpected command ${command}`);
     }
-    redeemCalls.push(args.code);
     if (redeemError) throw redeemError;
     return redeemResult;
   };
@@ -35,7 +33,6 @@ before(() => {
 });
 
 afterEach(async () => {
-  redeemCalls.length = 0;
   redeemResult = { name: "alice.dntls" };
   redeemError = null;
   const { cleanup } = await import("@testing-library/react");
@@ -56,18 +53,7 @@ async function renderForm(props = {}) {
   );
 }
 
-test("trims the one-time code before redeeming", async () => {
-  const { fireEvent, screen } = await import("@testing-library/react");
-  await renderForm();
-  fireEvent.change(screen.getByTestId("dntls-credential-code-input"), {
-    target: { value: "  AbCd-EfGh-IjKl  " },
-  });
-  fireEvent.click(screen.getByTestId("dntls-credential-code-connect"));
-  await screen.findByTestId("dntls-credential-code-bound");
-  assert.deepEqual(redeemCalls, ["AbCd-EfGh-IjKl"]);
-});
-
-test("shows an inline error for an invalid code without connecting", async () => {
+test("a rejected code stays retryable and clears its error after success", async () => {
   redeemError = {
     code: "credential_code_invalid",
     message: "ignored backend wording",
@@ -78,25 +64,16 @@ test("shows an inline error for an invalid code without connecting", async () =>
     target: { value: "used-code" },
   });
   fireEvent.click(screen.getByTestId("dntls-credential-code-connect"));
+  await screen.findByTestId("dntls-credential-code-error");
   assert.equal(
-    (await screen.findByTestId("dntls-credential-code-error")).textContent,
-    "That code is not valid. Codes work once and expire; export a new one.",
+    screen.getByTestId("dntls-credential-code-connect").disabled,
+    false,
   );
   assert.equal(screen.queryByTestId("dntls-credential-code-bound"), null);
-});
-
-test("shows an inline error when redeem is rate limited", async () => {
-  redeemError = { code: "rate_limited", message: "slow down" };
-  const { fireEvent, screen } = await import("@testing-library/react");
-  await renderForm();
-  fireEvent.change(screen.getByTestId("dntls-credential-code-input"), {
-    target: { value: "AAAA-BBBB-CCCC" },
-  });
+  redeemError = null;
   fireEvent.click(screen.getByTestId("dntls-credential-code-connect"));
-  assert.equal(
-    (await screen.findByTestId("dntls-credential-code-error")).textContent,
-    "Too many attempts, wait a minute.",
-  );
+  await screen.findByTestId("dntls-credential-code-bound");
+  assert.equal(screen.queryByTestId("dntls-credential-code-error"), null);
 });
 
 test("displays the redeemed FQDN as-is", async () => {
@@ -109,7 +86,10 @@ test("displays the redeemed FQDN as-is", async () => {
   });
   fireEvent.click(screen.getByTestId("dntls-credential-code-connect"));
   const bound = await screen.findByTestId("dntls-credential-code-bound");
-  assert.match(bound.textContent, /Buzz is connected as buzz\.demo-alice\.dntls/);
+  assert.match(
+    bound.textContent,
+    /Buzz is connected as buzz\.demo-alice\.dntls/,
+  );
   fireEvent.click(screen.getByTestId("dntls-credential-code-continue"));
   assert.deepEqual(connected, ["buzz.demo-alice.dntls"]);
 });

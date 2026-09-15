@@ -215,7 +215,7 @@ export function InviteRedeemForm({
         }
         setPolicyError(
           isDntlsError(policyFetchError)
-            ? policyFetchError.message
+            ? "Could not connect to this DNTLS community. Please try again."
             : inviteErrorMessage(policyFetchError),
         );
       } finally {

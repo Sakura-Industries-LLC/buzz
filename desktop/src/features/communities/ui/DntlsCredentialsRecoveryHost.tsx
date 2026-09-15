@@ -20,9 +20,13 @@ export function DntlsCredentialsRecoveryHost() {
   const { retryDntlsConnectors } = useCommunities();
   const [open, setOpen] = React.useState(false);
   const retryingRef = React.useRef(false);
+  const recoveryPendingRef = React.useRef(false);
 
   const openRecovery = React.useCallback(() => {
-    if (retryingRef.current) return;
+    if (retryingRef.current) {
+      recoveryPendingRef.current = true;
+      return;
+    }
     setOpen(true);
   }, []);
 
@@ -65,6 +69,10 @@ export function DntlsCredentialsRecoveryHost() {
           })
           .finally(() => {
             retryingRef.current = false;
+            if (recoveryPendingRef.current) {
+              recoveryPendingRef.current = false;
+              setOpen(true);
+            }
           });
       }}
       onOpenChange={setOpen}
@@ -72,4 +80,3 @@ export function DntlsCredentialsRecoveryHost() {
     />
   );
 }
-

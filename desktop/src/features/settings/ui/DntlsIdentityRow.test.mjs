@@ -30,8 +30,20 @@ before(() => {
   Object.assign(globalThis, {
     document: dom.window.document,
     HTMLElement: dom.window.HTMLElement,
+    HTMLInputElement: dom.window.HTMLInputElement,
+    Node: dom.window.Node,
+    NodeFilter: dom.window.NodeFilter,
+    MutationObserver: dom.window.MutationObserver,
+    CustomEvent: dom.window.CustomEvent,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
+    localStorage: dom.window.localStorage,
     IS_REACT_ACT_ENVIRONMENT: true,
     window: dom.window,
+  });
+  dom.window.matchMedia = () => ({
+    matches: false,
+    addEventListener() {},
+    removeEventListener() {},
   });
   installInvoke();
 });
@@ -49,9 +61,16 @@ async function renderRow() {
   const React = await import("react");
   const { act, render } = await import("@testing-library/react");
   const { DntlsIdentityRow } = await import("./DntlsIdentityRow.tsx");
+  const { ThemeProvider } = await import("@/shared/theme/ThemeProvider.tsx");
   let view;
   await act(async () => {
-    view = render(React.createElement(DntlsIdentityRow));
+    view = render(
+      React.createElement(
+        ThemeProvider,
+        null,
+        React.createElement(DntlsIdentityRow),
+      ),
+    );
   });
   return view;
 }
