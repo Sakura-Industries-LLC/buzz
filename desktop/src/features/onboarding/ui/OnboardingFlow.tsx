@@ -556,6 +556,7 @@ export function OnboardingFlow({
       <>
         <MembershipDenied
           activeRelayUrl={activeCommunity?.relayUrl ?? ""}
+          dntlsDeclined={Boolean(activeCommunity?.dntlsName)}
           onBack={() => {
             setTransitionDirection("backward");
             setCurrentPage(deniedFromPage);

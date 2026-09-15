@@ -13,7 +13,9 @@ Desktop chat shell with:
 Communities that require admin approval show **Waiting for approval** before
 profile setup. Buzz checks again about every five seconds. Once approved, it
 publishes your verified DNTLS name and opens the community automatically.
-An admin rejection shows **Not a member yet** instead.
+A later install of an already-approved name enters the same way, with no
+waiting screen. An admin rejection shows **Request declined**, without
+invitation or key-recovery hints.
 
 Pending approval responses during profile lookup, publishing, or other
 onboarding requests return to the same waiting screen.

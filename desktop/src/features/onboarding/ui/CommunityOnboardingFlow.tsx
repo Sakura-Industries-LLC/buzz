@@ -547,6 +547,7 @@ export function CommunityOnboardingFlow({
       <>
         <MembershipDenied
           activeRelayUrl={transaction.relayUrl}
+          dntlsDeclined={Boolean(transaction.dntlsName)}
           onBack={() => setIsMembershipDenied(false)}
           onChangeCommunity={() => setIsCommunityChangeOpen(true)}
           onImportKey={async (nsec) => {
