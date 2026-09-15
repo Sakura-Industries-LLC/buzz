@@ -1245,9 +1245,9 @@ mod tests {
         assert_eq!(migrations[41].version, 42);
         let rejected = migrations[41].sql.as_str();
         assert!(rejected.contains("rejected"));
-        assert!(rejected.contains("dntls_applications_live_fqdn_idx"));
+        assert!(!rejected.contains("dntls_applications_live_fqdn_idx"));
         assert!(desired_schema.contains("status IN ('pending', 'approved', 'rejected')"));
-        assert!(desired_schema.contains("dntls_applications_live_fqdn_idx"));
+        assert!(desired_schema.contains("UNIQUE (community_id, fqdn)"));
     }
 
     #[test]

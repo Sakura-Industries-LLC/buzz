@@ -92,8 +92,8 @@ async fn lock_application_bindings(
 /// approved application for `fqdn` in `community`, returns
 /// [`UpsertJoinOutcome::NameAlreadyClaimed`] and writes nothing. Repeating a
 /// verified application for the same pubkey replaces its own pending row.
-/// A rejected pubkey is left rejected and cannot requeue; a rejected name
-/// does not block a different key.
+/// A rejected pubkey is left rejected and cannot requeue. A different key
+/// proving the same name deletes that rejected row and inserts pending.
 pub async fn upsert_pending_application(
     pool: &PgPool,
     community: CommunityId,
@@ -102,6 +102,20 @@ pub async fn upsert_pending_application(
 ) -> Result<UpsertJoinOutcome> {
     let mut tx = pool.begin().await?;
     lock_application_bindings(&mut tx, community).await?;
+
+    let existing_self: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM dntls_applications \
+         WHERE community_id = $1 AND pubkey = $2 \
+         FOR UPDATE",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if existing_self.as_deref() == Some("rejected") {
+        tx.commit().await?;
+        return Ok(UpsertJoinOutcome::Rejected);
+    }
 
     let existing_fqdn: Option<String> = sqlx::query_scalar(
         "SELECT pubkey FROM dntls_applications \
@@ -119,14 +133,14 @@ pub async fn upsert_pending_application(
         return Ok(UpsertJoinOutcome::NameAlreadyClaimed);
     }
 
-    let existing_self: Option<String> = sqlx::query_scalar(
-        "SELECT status FROM dntls_applications \
-         WHERE community_id = $1 AND pubkey = $2 \
-         FOR UPDATE",
+    sqlx::query(
+        "DELETE FROM dntls_applications \
+         WHERE community_id = $1 AND fqdn = $2 AND pubkey <> $3 AND status = 'rejected'",
     )
     .bind(community.as_uuid())
+    .bind(fqdn)
     .bind(pubkey)
-    .fetch_optional(&mut *tx)
+    .execute(&mut *tx)
     .await?;
 
     match existing_self.as_deref() {
@@ -148,10 +162,6 @@ pub async fn upsert_pending_application(
                 return Ok(UpsertJoinOutcome::Pending);
             }
             return Ok(UpsertJoinOutcome::NameAlreadyClaimed);
-        }
-        Some("rejected") => {
-            tx.commit().await?;
-            return Ok(UpsertJoinOutcome::Rejected);
         }
         Some("pending") => {
             let update = sqlx::query(
@@ -244,8 +254,7 @@ pub async fn upsert_approved_application(
     // protects this pre-read even if another claim moves a pending name.
     let previous: Option<String> = sqlx::query_scalar(
         "SELECT pubkey FROM dntls_applications \
-         WHERE community_id = $1 AND fqdn = $2 \
-           AND status IN ('pending', 'approved')",
+         WHERE community_id = $1 AND fqdn = $2",
     )
     .bind(community.as_uuid())
     .bind(fqdn)
@@ -257,13 +266,13 @@ pub async fn upsert_approved_application(
         "INSERT INTO dntls_applications \
          (community_id, pubkey, fqdn, status, approved_at, approved_by) \
          VALUES ($1, $2, $3, 'approved', now(), $4) \
-         ON CONFLICT (community_id, fqdn) WHERE status IN ('pending', 'approved') DO UPDATE \
+         ON CONFLICT (community_id, fqdn) DO UPDATE \
          SET pubkey = EXCLUDED.pubkey, status = 'approved', \
              created_at = CASE WHEN dntls_applications.pubkey = EXCLUDED.pubkey \
                  THEN dntls_applications.created_at ELSE EXCLUDED.created_at END, \
              approved_at = EXCLUDED.approved_at, approved_by = EXCLUDED.approved_by \
          WHERE dntls_applications.pubkey <> EXCLUDED.pubkey \
-             OR dntls_applications.status = 'pending'",
+             OR dntls_applications.status IN ('pending', 'rejected')",
     )
     .bind(community.as_uuid())
     .bind(pubkey)
@@ -1155,5 +1164,15 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].pubkey, fourth);
         assert_eq!(pending[0].fqdn, "bob.example");
+        assert!(db
+            .get_dntls_application(community, &third)
+            .await
+            .expect("replaced rejected")
+            .is_none());
+        assert!(db
+            .approve_dntls_application(community, &third, "bob.example", &fourth, false)
+            .await
+            .expect("stale rejected approve")
+            .is_none());
     }
 }

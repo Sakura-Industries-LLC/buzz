@@ -1,5 +1,5 @@
--- Remember DNTLS join rejections without burning the verified name.
--- The same pubkey cannot requeue; another key may still apply for that fqdn.
+-- Remember DNTLS join rejections. UNIQUE (community_id, fqdn) stays so a
+-- later applicant replaces a rejected row rather than sharing the name.
 SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE dntls_applications
@@ -14,10 +14,3 @@ ALTER TABLE dntls_applications
             (status IN ('pending', 'rejected') AND approved_at IS NULL AND approved_by IS NULL)
             OR (status = 'approved' AND approved_at IS NOT NULL)
         );
-
-ALTER TABLE dntls_applications
-    DROP CONSTRAINT dntls_applications_community_id_fqdn_key;
-
-CREATE UNIQUE INDEX dntls_applications_live_fqdn_idx
-    ON dntls_applications (community_id, fqdn)
-    WHERE status IN ('pending', 'approved');

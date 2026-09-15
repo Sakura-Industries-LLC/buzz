@@ -624,8 +624,9 @@ CREATE INDEX relay_invites_expires_at_idx ON relay_invites (expires_at);
 
 -- ── DNTLS join-proof applications ─────────────────────────────────────────────
 -- Conformance: community-scoped pending/approved/rejected pubkey→fqdn mappings.
--- PK (community_id, pubkey) remembers a rejected key. Live names
--- (pending/approved) are unique per community so a rejection does not burn fqdn.
+-- PK (community_id, pubkey) remembers a rejected key until another key
+-- replaces that fqdn. UNIQUE (community_id, fqdn) is first-bound-wins for
+-- live names; a later applicant deletes the rejected row and takes the name.
 
 CREATE TABLE dntls_applications (
     community_id UUID        NOT NULL REFERENCES communities(id),
@@ -636,15 +637,12 @@ CREATE TABLE dntls_applications (
     approved_at  TIMESTAMPTZ,
     approved_by  TEXT,
     PRIMARY KEY (community_id, pubkey),
+    UNIQUE (community_id, fqdn),
     CHECK (
         (status IN ('pending', 'rejected') AND approved_at IS NULL AND approved_by IS NULL)
         OR (status = 'approved' AND approved_at IS NOT NULL)
     )
 );
-
-CREATE UNIQUE INDEX dntls_applications_live_fqdn_idx
-    ON dntls_applications (community_id, fqdn)
-    WHERE status IN ('pending', 'approved');
 
 CREATE INDEX dntls_applications_status_idx
     ON dntls_applications (community_id, status, created_at);

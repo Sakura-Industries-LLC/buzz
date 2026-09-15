@@ -2012,6 +2012,22 @@ mod tests {
                 .any(|msg| msg.contains(AUTH_APPROVAL_PENDING)),
             "a different key may still apply for the freed name: {messages:?}"
         );
+        assert!(state
+            .db
+            .get_dntls_application(community.id, &joiner.public_key().to_hex())
+            .await
+            .expect("replaced rejected")
+            .is_none());
+        let steal = send(
+            state,
+            &host,
+            Method::POST,
+            APPROVE_PATH,
+            &owner,
+            serde_json::json!({ "pubkey": joiner.public_key().to_hex() }).to_string(),
+        )
+        .await;
+        assert_eq!(steal.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
