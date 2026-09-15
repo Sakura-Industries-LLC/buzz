@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { App } from "@/app/App";
 import { RootErrorBoundary } from "@/app/RootErrorBoundary";
 import { NostrBindConsentDialog } from "@/features/profile/ui/NostrBindConsentDialog";
+import { DntlsCredentialsRecoveryHost } from "@/features/communities/ui/DntlsCredentialsRecoveryHost";
 import "@fontsource-variable/inter/opsz.css";
 import "@fontsource-variable/inter/opsz-italic.css";
 import "@fontsource/jetbrains-mono/400.css";
@@ -95,6 +96,7 @@ function renderApp() {
                     <UpdaterProvider>
                       <App />
                       <NostrBindConsentDialog />
+                      <DntlsCredentialsRecoveryHost />
                     </UpdaterProvider>
                     <Toaster />
                   </PoofBurstProvider>

@@ -17,7 +17,11 @@ import {
   saveActiveCommunityId,
   saveCommunities,
 } from "./communityStorage";
-import { startDntlsConnector } from "./dntlsConnector";
+import {
+  isCredentialsChangedError,
+  requestDntlsCredentialsRecovery,
+  startDntlsConnector,
+} from "./dntlsConnector";
 import { removeSelfProfileCachesForRelay } from "@/features/profile/lib/selfProfileStorage";
 import { removeUserLabelCacheForRelay } from "@/features/profile/lib/userLabelStorage";
 import { removeChannelSnapshotForRelay } from "@/features/channels/channelSnapshot";
@@ -152,6 +156,8 @@ export type UseCommunitiesReturn = {
       Pick<Community, "name" | "relayUrl" | "token" | "pubkey" | "reposDir">
     >,
   ) => UpdateCommunityResult;
+  /** Re-dial DNTLS connectors after credentials are replaced. */
+  retryDntlsConnectors: () => Promise<boolean>;
   /** Persist a new display order for the rail. IDs not in orderedIds keep their relative position at the end. */
   reorderCommunities: (orderedIds: string[]) => void;
 };
@@ -184,18 +190,25 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
   const [reinitKey, setReinitKey] = useState(0);
   const communitiesRef = useRef(communities);
   communitiesRef.current = communities;
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+  const restoreGeneration = useRef(0);
 
-  useEffect(() => {
-    let cancelled = false;
-    for (const community of communitiesRef.current) {
-      if (!community.dntlsName) continue;
-      void startDntlsConnector(community.dntlsName)
-        .then((ready) => {
-          if (cancelled) return;
+  const restoreDntlsConnectors = useCallback(
+    async (announceRecovery: boolean) => {
+      const generation = ++restoreGeneration.current;
+      let needsRecovery = false;
+      for (const community of communitiesRef.current) {
+        if (!community.dntlsName) continue;
+        try {
+          const ready = await startDntlsConnector(community.dntlsName);
+          if (generation !== restoreGeneration.current) return false;
           setCommunitiesState((previous) => {
+            if (generation !== restoreGeneration.current) return previous;
             const current = previous.find((item) => item.id === community.id);
-            if (!current || current.relayUrl === ready.relayUrl)
+            if (!current || current.relayUrl === ready.relayUrl) {
               return previous;
+            }
             const next = previous.map((item) =>
               item.id === community.id
                 ? {
@@ -208,21 +221,40 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
             saveCommunities(next);
             return next;
           });
-          if (community.id === activeId) {
+          if (community.id === activeIdRef.current) {
             setReinitKey((key) => key + 1);
           }
-        })
-        .catch((error) => {
+        } catch (error) {
+          if (generation !== restoreGeneration.current) return false;
+          if (isCredentialsChangedError(error)) {
+            needsRecovery = true;
+            break;
+          }
           console.warn(
             `Failed to restore DNTLS community ${community.dntlsName}`,
             error,
           );
-        });
-    }
+        }
+      }
+      if (needsRecovery && announceRecovery) {
+        requestDntlsCredentialsRecovery();
+      }
+      return needsRecovery;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    void restoreDntlsConnectors(true);
     return () => {
-      cancelled = true;
+      restoreGeneration.current++;
     };
-  }, [activeId]);
+  }, [restoreDntlsConnectors]);
+
+  const retryDntlsConnectors = useCallback(
+    () => restoreDntlsConnectors(false),
+    [restoreDntlsConnectors],
+  );
 
   const activeCommunity = useMemo(
     () => communities.find((w) => w.id === activeId) ?? communities[0] ?? null,
@@ -384,6 +416,7 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
     switchCommunity,
     reconnectCommunity,
     updateCommunity,
+    retryDntlsConnectors,
     reorderCommunities,
   };
 }

@@ -220,21 +220,15 @@ type E2eConfig = {
     } | null;
     /**
      * Stored DNTLS identity name. Omit to pretend a credentials file is
-     * already present; set `null` to exercise the first-run resolver path.
+     * already present; set `null` to exercise first-run code entry.
      */
     dntlsCredentialsName?: string | null;
-    /**
-     * Whether a resolver registration bearer is stored. Omit for a
-     * registered install; set `false` to exercise the confirmation-code path.
-     */
-    dntlsRegistered?: boolean;
-    /**
-     * Confirmation code emitted on `list_dntls_identities` /
-     * `bind_dntls_identity` as `dntls-registration-code`.
-     */
-    dntlsRegistrationCode?: string;
-    /** Structured error thrown by `list_dntls_identities`. */
-    dntlsListError?: { code: string; message: string };
+    /** FQDN returned by a successful one-time code redeem. */
+    dntlsRedeemName?: string;
+    /** Structured error thrown by `redeem_dntls_credential_code`. */
+    dntlsRedeemError?: { code: string; message: string };
+    /** One-shot structured error thrown by `start_dntls_connector`. */
+    dntlsConnectorError?: { code: string; message: string };
     /** Delay Builderlab login completion so cancellation/retry UI can be tested. */
     builderlabLoginDelayMs?: number;
     /** Bound Builderlab Nostr identity. Null/omitted = not linked yet. */
@@ -11530,6 +11524,9 @@ export function maybeInstallE2eTauriMocks() {
     const identity = getActiveIdentity(activeConfig);
     window.__BUZZ_E2E_COMMANDS__?.push(command);
     const loggedPayload = (() => {
+      if (command === "redeem_dntls_credential_code") {
+        return { code: null };
+      }
       if (payload instanceof Uint8Array) {
         return { rawByteLength: payload.byteLength };
       }
@@ -11543,10 +11540,24 @@ export function maybeInstallE2eTauriMocks() {
       command,
       payload: loggedPayload,
     });
-    window.__BUZZ_E2E_COMMAND_LOG__?.push({ command, payload });
+    window.__BUZZ_E2E_COMMAND_LOG__?.push({
+      command,
+      payload:
+        command === "redeem_dntls_credential_code" ? { code: null } : payload,
+    });
 
     switch (command) {
       case "start_dntls_connector": {
+        const connectorError = activeConfig?.mock?.dntlsConnectorError;
+        if (connectorError) {
+          if (activeConfig?.mock) {
+            activeConfig.mock = {
+              ...activeConfig.mock,
+              dntlsConnectorError: undefined,
+            };
+          }
+          throw connectorError;
+        }
         if (
           !payload ||
           typeof payload !== "object" ||
@@ -11566,79 +11577,32 @@ export function maybeInstallE2eTauriMocks() {
           mock && Object.hasOwn(mock, "dntlsCredentialsName")
             ? (mock.dntlsCredentialsName ?? null)
             : "demo-alice.dntls";
-        const userName = name?.startsWith("buzz.")
-          ? name.slice("buzz.".length)
-          : name;
-        return { name, user_name: userName };
+        return { name };
       }
-      case "dntls_resolver_status":
-        return {
-          state: "ready",
-          registered: activeConfig?.mock?.dntlsRegistered ?? true,
-          socket: "/tmp/dntls-resolver.sock",
-        };
-      case "list_dntls_identities": {
-        const registrationCode = activeConfig?.mock?.dntlsRegistrationCode;
-        if (registrationCode) {
-          await emit("dntls-registration-code", { code: registrationCode });
+      case "redeem_dntls_credential_code": {
+        const redeemError = activeConfig?.mock?.dntlsRedeemError;
+        if (redeemError) throw redeemError;
+        if (
+          !payload ||
+          typeof payload !== "object" ||
+          !("code" in payload) ||
+          typeof payload.code !== "string" ||
+          payload.code.trim().length === 0
+        ) {
+          throw {
+            code: "credential_code_invalid",
+            message:
+              "That code is not valid. Codes work once and expire; export a new one.",
+          };
         }
-        const listError = activeConfig?.mock?.dntlsListError;
-        if (listError) {
-          await emit("dntls-registration-finished", {});
-          throw listError;
+        const name = activeConfig?.mock?.dntlsRedeemName ?? "demo-alice.dntls";
+        if (activeConfig) {
+          activeConfig.mock = {
+            ...activeConfig.mock,
+            dntlsCredentialsName: name,
+          };
         }
-        if (registrationCode) {
-          await emit("dntls-registration-finished", {});
-        }
-        return [
-          {
-            name: "demo-alice.dntls",
-            fqdn: "demo-alice.dntls",
-            has_private_identity: true,
-            active: true,
-          },
-          {
-            name: "demo-bob.dntls",
-            fqdn: "demo-bob.dntls",
-            has_private_identity: true,
-            active: false,
-          },
-        ];
-      }
-      case "bind_dntls_identity": {
-        const registrationCode = activeConfig?.mock?.dntlsRegistrationCode;
-        if (registrationCode) {
-          await emit("dntls-registration-code", { code: registrationCode });
-        }
-        try {
-          if (
-            !payload ||
-            typeof payload !== "object" ||
-            !("name" in payload) ||
-            typeof payload.name !== "string"
-          ) {
-            throw {
-              code: "invalid_request",
-              message: "Missing DNTLS name.",
-            };
-          }
-          const selected = payload.name;
-          const fqdn = selected.endsWith(".dntls")
-            ? selected
-            : `${selected}.dntls`;
-          const name = `buzz.${fqdn}`;
-          if (activeConfig) {
-            activeConfig.mock = {
-              ...activeConfig.mock,
-              dntlsCredentialsName: name,
-            };
-          }
-          return { name, scope: "subname" };
-        } finally {
-          if (registrationCode) {
-            await emit("dntls-registration-finished", {});
-          }
-        }
+        return { name };
       }
       case "remove_dntls_credentials": {
         if (activeConfig) {

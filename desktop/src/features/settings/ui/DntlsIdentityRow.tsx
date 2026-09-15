@@ -5,14 +5,8 @@ import {
   removeDntlsCredentials,
   type DntlsCredentialsStatus,
 } from "@/features/communities/dntlsConnector";
-import { DntlsIdentityPicker } from "@/features/communities/ui/DntlsIdentityPicker";
+import { DntlsCredentialCodeDialog } from "@/features/communities/ui/DntlsCredentialCodeForm";
 import { Button } from "@/shared/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-} from "@/shared/ui/dialog";
 
 function formatStatus(status: DntlsCredentialsStatus | null): string {
   if (!status?.name) return "not set";
@@ -54,7 +48,7 @@ export function DntlsIdentityRow() {
     setReconnectHint(false);
     try {
       await removeDntlsCredentials();
-      setStatus({ name: null, user_name: null });
+      setStatus({ name: null });
     } catch (removeError) {
       setError(
         removeError instanceof Error
@@ -84,7 +78,7 @@ export function DntlsIdentityRow() {
             type="button"
             variant="secondary"
           >
-            Replace
+            Replace…
           </Button>
           {status?.name ? (
             <Button
@@ -107,30 +101,15 @@ export function DntlsIdentityRow() {
         </p>
       ) : null}
       {error ? <p className="mt-2 text-sm text-destructive">{error}</p> : null}
-      <Dialog
-        onOpenChange={(open) => {
-          if (!open) setPickerOpen(false);
+      <DntlsCredentialCodeDialog
+        onConnected={(name) => {
+          setStatus({ name });
+          setReconnectHint(true);
+          setPickerOpen(false);
         }}
+        onOpenChange={setPickerOpen}
         open={pickerOpen}
-      >
-        <DialogContent
-          className="max-w-lg"
-          data-testid="dntls-identity-picker-dialog"
-        >
-          <DialogTitle>Choose your DNTLS name</DialogTitle>
-          <DialogDescription>
-            Buzz will use this name when you join DNTLS communities.
-          </DialogDescription>
-          <DntlsIdentityPicker
-            onBound={() => {
-              void dntlsCredentialsStatus().then(setStatus);
-              setReconnectHint(true);
-              setPickerOpen(false);
-            }}
-            onCancel={() => setPickerOpen(false)}
-          />
-        </DialogContent>
-      </Dialog>
+      />
     </div>
   );
 }

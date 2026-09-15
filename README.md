@@ -132,6 +132,28 @@ The Windows build is not code-signed, so SmartScreen may show "Windows protected
 
 By default the app connects to `ws://localhost:3000`. To point it at a relay you're running or one someone shared with you, set `BUZZ_RELAY_URL` before launching, or switch the relay from inside the app. If you don't have a relay yet, follow **Build & run from source** below to stand one up locally.
 
+### Connect a DNTLS name
+
+In the [DNTLS Portal](https://preview.dntls.net), open the name or subname
+you want Buzz to use, then choose **EXPORT → Export one-time code**.
+In Buzz's **Connect your DNTLS name** step, paste the code and select
+**Connect**. Check the full name shown, then select **Continue**.
+Choose **Skip for now** if you only use other communities.
+
+Codes work once and expire. If a code is rejected, export another one.
+Buzz stores only the credentials on this device, not the code. No separate
+desktop service is needed.
+
+Under **Settings → Profile → Identity details**, the DNTLS identity row
+shows the full connected name. **Replace…** opens the same code form and
+resets existing DNTLS connections. **Remove** disconnects the identity.
+Buzz refreshes stale credentials after renewal. If the name's credentials
+have changed and can no longer sign in, Buzz asks for a new one-time code.
+
+Development builds can select a different Portal with
+`BUZZ_DNTLS_PORTAL_URL`; packaged release builds use
+`https://preview.dntls.net`.
+
 ### I want my own hosted relay
 
 To run a relay for your team without managing servers, you can deploy one to Railway in a click:
