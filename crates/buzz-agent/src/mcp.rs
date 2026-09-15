@@ -1064,7 +1064,6 @@ mod content_tests {
         assert!(PASSTHROUGH_ENV.contains(&"BUZZ_RELAY_AUTH_URL"));
     }
 
-
     #[test]
     fn passthrough_carries_proxy_configuration_to_tools() {
         // On a proxy-only host this is the difference between an agent that can

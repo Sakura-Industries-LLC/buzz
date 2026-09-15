@@ -196,10 +196,7 @@ fn loopback_wss_localhost_preserves_authority() {
 #[test]
 fn dntls_loopback_query_rewrites_to_https_and_drops_port() {
     assert_eq!(
-        rewrite_url_for_auth(
-            "http://127.0.0.1:63330/query",
-            Some("buzzdemo.dntls"),
-        ),
+        rewrite_url_for_auth("http://127.0.0.1:63330/query", Some("buzzdemo.dntls"),),
         "https://buzzdemo.dntls/query"
     );
 }
@@ -215,10 +212,7 @@ fn dntls_loopback_ws_rewrites_to_wss_and_drops_port() {
 #[test]
 fn dntls_wss_transport_stays_wss() {
     assert_eq!(
-        rewrite_url_for_auth(
-            "wss://127.0.0.1:443/huddle/1/audio",
-            Some("buzzdemo.dntls"),
-        ),
+        rewrite_url_for_auth("wss://127.0.0.1:443/huddle/1/audio", Some("buzzdemo.dntls"),),
         "wss://buzzdemo.dntls/huddle/1/audio"
     );
 }
@@ -261,8 +255,6 @@ fn managed_agent_spawn_env_omits_auth_url_for_ordinary_community() {
         None
     );
 }
-
-
 
 // ── classify_intercepted_response ────────────────────────────────────────
 

@@ -210,16 +210,16 @@ mod tests {
     #[test]
     fn auth_event_relay_tag_is_the_given_url() {
         let keys = Keys::generate();
-        let event = build_auth_event("challenge", "wss://buzz.dntls", &keys, None)
-            .expect("sign AUTH");
+        let event =
+            build_auth_event("challenge", "wss://buzz.dntls", &keys, None).expect("sign AUTH");
         assert_eq!(relay_tag(&event), "wss://buzz.dntls");
     }
 
     #[test]
     fn auth_event_does_not_rewrite_a_loopback_transport_url() {
         let keys = Keys::generate();
-        let event = build_auth_event("challenge", "ws://127.0.0.1:60578", &keys, None)
-            .expect("sign AUTH");
+        let event =
+            build_auth_event("challenge", "ws://127.0.0.1:60578", &keys, None).expect("sign AUTH");
         assert_eq!(relay_tag(&event), "ws://127.0.0.1:60578");
     }
 }

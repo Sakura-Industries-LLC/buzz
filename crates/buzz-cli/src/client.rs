@@ -141,7 +141,6 @@ fn nip98_signed_url(request_url: &str, auth_origin: Option<&str>) -> String {
     format!("{origin_http}{}", path_query_from_url(request_url))
 }
 
-
 fn relay_server_tag(relay_url: &str) -> Option<String> {
     let authority = buzz_core::tenant::relay_url_authority(relay_url);
     if authority.is_empty() {
@@ -1141,7 +1140,6 @@ impl BuzzClient {
         )
         .await
         .map_err(|e| CliError::Other(e.to_string()))?;
-
 
         if !ok.accepted {
             return Err(CliError::Relay {

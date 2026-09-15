@@ -81,7 +81,13 @@ impl DntlsListener {
         let acceptor =
             TlsAcceptor::from(handshaker.server_config(ClientIdentityMode::RequireIdentity)?);
         let (tx, ready) = mpsc::channel(READY_BACKLOG);
-        tokio::spawn(accept_loop(tcp, acceptor, handshaker, community.clone(), tx));
+        tokio::spawn(accept_loop(
+            tcp,
+            acceptor,
+            handshaker,
+            community.clone(),
+            tx,
+        ));
         Ok(Self {
             local,
             community,

@@ -379,7 +379,6 @@ export function canonicalAuthUrl(url: string): Promise<string> {
   return invokeTauri<string>("canonical_auth_url", { url });
 }
 
-
 export async function addChannelMembers(
   input: AddChannelMembersInput,
 ): Promise<AddChannelMembersResult> {

@@ -3604,7 +3604,6 @@ async fn send_auth_response(
         auth_tag,
     )?;
 
-
     let auth_msg = serde_json::to_string(&json!(["AUTH", auth_event]))?;
     ws_send_timeout(ws, Message::Text(auth_msg.into()), WS_SEND_TIMEOUT_SECS).await?;
     debug!("sent AUTH response for challenge");
@@ -4209,14 +4208,8 @@ mod tests {
     #[test]
     fn auth_falls_back_to_transport_without_override() {
         let keys = Keys::generate();
-        let event = build_nip42_auth_event(
-            "challenge",
-            "ws://127.0.0.1:60578",
-            None,
-            &keys,
-            None,
-        )
-        .expect("sign AUTH");
+        let event = build_nip42_auth_event("challenge", "ws://127.0.0.1:60578", None, &keys, None)
+            .expect("sign AUTH");
         assert_eq!(auth_relay_tag(&event), "ws://127.0.0.1:60578");
     }
 
@@ -4231,7 +4224,6 @@ mod tests {
             "http://127.0.0.1:60578/events"
         );
     }
-
 
     #[test]
     fn channel_sub_id_format() {
