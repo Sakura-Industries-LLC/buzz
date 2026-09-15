@@ -30,7 +30,7 @@ pub enum UpsertJoinOutcome {
         /// same transaction; `owner` rows are never touched.
         displaced: Option<String>,
         /// Auto/admin path: inserted `admin` or promoted `member` → `admin`.
-        /// Approve ordinary rebind: inserted `member` for `pubkey`.
+        /// Approve rebind or inherited admission: inserted `member` for `pubkey`.
         membership_changed: bool,
     },
     /// This key already has an approved mapping for another name, or a
@@ -49,9 +49,9 @@ pub struct DntlsApplication {
     pub status: String,
     /// When created, replaced while pending, or rebound to a different pubkey.
     pub created_at: DateTime<Utc>,
-    /// When an owner/admin approved the application, if approved.
+    /// When the application was approved, explicitly or by admission policy.
     pub approved_at: Option<DateTime<Utc>>,
-    /// Hex pubkey of the approving owner/admin, if approved.
+    /// Approving pubkey: owner/admin, caller in auto mode, or approved ancestor.
     pub approved_by: Option<String>,
 }
 
@@ -95,8 +95,10 @@ async fn lock_application_bindings(
 /// absent, and the displaced key's non-owner membership is removed.
 /// Repeating a verified application for the same pubkey replaces its own
 /// pending row. A rejected pubkey is left rejected and cannot requeue. A
-/// different key proving the same name deletes that rejected row and inserts
-/// pending.
+/// different key proving the same name deletes that rejected row and reapplies.
+/// A fresh or pending application inherits approval from its nearest approved
+/// DNTLS ancestor in this community, recording the ancestor's pubkey as approver
+/// and inserting ordinary membership atomically; otherwise it stays pending.
 ///
 /// An approved mapping for another name on this key is preserved: the
 /// transaction writes nothing and returns
@@ -266,6 +268,45 @@ pub async fn upsert_pending_application(
                 Err(err) => return Err(err.into()),
             }
         }
+    }
+
+    let mut ancestor = fqdn;
+    while let Some((_, parent)) = ancestor.split_once('.') {
+        ancestor = parent;
+        let approved_by: Option<String> = sqlx::query_scalar(
+            "SELECT pubkey FROM dntls_applications \
+             WHERE community_id = $1 AND fqdn = $2 AND status = 'approved'",
+        )
+        .bind(community.as_uuid())
+        .bind(ancestor)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(approved_by) = approved_by else {
+            continue;
+        };
+        sqlx::query(
+            "UPDATE dntls_applications \
+             SET status = 'approved', approved_at = now(), approved_by = $3 \
+             WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(pubkey)
+        .bind(approved_by)
+        .execute(&mut *tx)
+        .await?;
+        let membership_changed = super::relay_members::insert_relay_member_on(
+            &mut tx,
+            community,
+            pubkey,
+            "member",
+            Some("invite"),
+        )
+        .await?;
+        tx.commit().await?;
+        return Ok(UpsertJoinOutcome::Bound {
+            displaced: None,
+            membership_changed,
+        });
     }
 
     tx.commit().await?;
@@ -477,8 +518,8 @@ pub async fn reject_application(
 }
 
 impl Db {
-    /// Insert or replace this pubkey's pending DNTLS application, or rebind
-    /// an approved name. See [`upsert_pending_application`].
+    /// Apply approve-mode admission: rebind an approved name, inherit ancestor
+    /// approval, or queue pending. See [`upsert_pending_application`].
     #[datastore_span(name = "upsert_dntls_pending_application", system = "postgresql")]
     pub async fn upsert_dntls_pending_application(
         &self,

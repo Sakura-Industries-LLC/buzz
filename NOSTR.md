@@ -124,12 +124,18 @@ Removing a name from the list does not demote existing admins at startup;
 that remains a manual admin action. A nonempty list requires
 `BUZZ_DNTLS_ADMISSION=auto` or `approve`; malformed entries fail startup.
 
+In `approve` mode, a verified subname inherits membership (never the admin
+role) from its nearest approved DNTLS ancestor in the same community, with
+`approved_by` set to that ancestor's pubkey.
+
 In `auto` mode, or for a listed admin in `approve` mode, a verified name can
 rebind to a new key. The displaced key keeps ordinary membership; a listed
 name's displaced `admin` becomes `member` in the same transaction that grants
 the new key `admin`. Owners are never demoted. Other `approve` applications
-cannot replace a name held by another key, and no key can hold two approved
-names in one community. A refused binding still permits ordinary membership:
+replace pending bindings and inherit an approved name's approval, removing
+the displaced key's membership unless it is an owner. A rejected key cannot
+reapply, but a different verified key can replace its mapping. No key can hold
+two approved names in one community. A refused binding still permits ordinary membership:
 WebSocket AUTH sends `NOTICE dntls: name already claimed`; HTTP has no NOTICE
 channel. Repeating the same binding is idempotent.
 
