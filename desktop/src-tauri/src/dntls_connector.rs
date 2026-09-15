@@ -124,10 +124,6 @@ pub(crate) async fn start_dntls_connector(
         .running
         .lock()
         .map_err(|_| "DNTLS connector state is unavailable".to_string())?;
-    if let Some(existing) = running.get(&community) {
-        // A concurrent start won; serve that listener and drop ours.
-        return Ok(existing.ready.clone());
-    }
     let task = tauri::async_runtime::spawn(accept_loop(
         app, listener, community.clone(), verified,
     ));
