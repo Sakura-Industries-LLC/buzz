@@ -73,6 +73,7 @@ import {
 import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
 import {
   armRelayAuthentication,
+  authReconnectDelayMs,
   AuthOkTracker,
   type RelayAuthRequest,
 } from "@/shared/api/relayAuthPolicy";
@@ -86,6 +87,7 @@ export class RelayClient {
   private reconnectTimeout: number | null = null;
   private reconnectWaiters = new RelayReconnectWaiters();
   private reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
+  private nextReconnectDelayMs: number | null = null;
   private keepAliveRequested = false;
   private authRequest: RelayAuthRequest | null = null;
   private subscriptions = new Map<string, RelaySubscription>();
@@ -175,6 +177,7 @@ export class RelayClient {
     this.connectionStateEmitter.clear();
     this.onMessageChannel = null;
     this.reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
+    this.nextReconnectDelayMs = null;
   }
 
   async fetchChannelHistory(channelId: string, limit = 50) {
@@ -898,14 +901,16 @@ export class RelayClient {
       const authRequest = this.authRequest;
       this.authRequest = null;
 
-      // Decision table lives in relayAuthPolicy.ts.
       const decision = this.authOkTracker.record(success, message);
       if (decision === "authenticated") {
         authRequest.resolve();
       } else {
         const error = new Error(message || "Relay authentication rejected.");
         authRequest.reject(error);
-        this.resetConnection(error, { reconnect: decision === "retry" });
+        this.resetConnection(error, {
+          reconnect: decision === "retry",
+          delayMs: authReconnectDelayMs(message),
+        });
       }
 
       return;
@@ -964,14 +969,20 @@ export class RelayClient {
       return;
     }
 
-    // ±25% jitter spreads a fleet's AUTH storms across a 50% window instead
-    // of hitting the relay at the same instant.
-    const jitter = this.reconnectDelayMs * (0.75 + Math.random() * 0.5);
-    const delay = Math.min(jitter, RECONNECT_MAX_DELAY_MS);
-    this.reconnectDelayMs = Math.min(
-      this.reconnectDelayMs * 2,
-      RECONNECT_MAX_DELAY_MS,
-    );
+    const forcedDelay = this.nextReconnectDelayMs;
+    this.nextReconnectDelayMs = null;
+    const delay =
+      forcedDelay ??
+      Math.min(
+        this.reconnectDelayMs * (0.75 + Math.random() * 0.5),
+        RECONNECT_MAX_DELAY_MS,
+      );
+    if (forcedDelay == null) {
+      this.reconnectDelayMs = Math.min(
+        this.reconnectDelayMs * 2,
+        RECONNECT_MAX_DELAY_MS,
+      );
+    }
 
     this.reconnectTimeout = window.setTimeout(() => {
       this.reconnectTimeout = null;
@@ -1010,6 +1021,7 @@ export class RelayClient {
     error: Error,
     options?: {
       reconnect?: boolean;
+      delayMs?: number;
     },
   ) {
     this.onMessageChannel = null;
@@ -1022,6 +1034,9 @@ export class RelayClient {
     if (this.flushTimeout !== null) window.clearTimeout(this.flushTimeout);
     this.flushTimeout = null;
     this.eventBuffer = [];
+    if (options?.delayMs != null) {
+      this.nextReconnectDelayMs = options.delayMs;
+    }
 
     if (options?.reconnect === false) {
       this.terminal = true;

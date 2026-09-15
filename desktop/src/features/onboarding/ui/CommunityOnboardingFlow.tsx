@@ -8,6 +8,8 @@ import {
 } from "@/features/onboarding/communityOnboarding";
 import { initializeStarterChannels } from "@/features/onboarding/hooks";
 import { useClaimInvite } from "@/features/onboarding/useClaimInvite";
+import { startAwaitingApprovalRetry } from "@/features/onboarding/awaitingApprovalRetry";
+import { membershipGateViewForError } from "@/features/onboarding/membershipGate";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
 import {
   takePendingWelcomeChannelForDirectEntry,
@@ -33,6 +35,7 @@ import { Button } from "@/shared/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { MembershipDenied } from "./MembershipDenied";
+import { AwaitingApproval } from "./AwaitingApproval";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import {
   ONBOARDING_PRIMARY_CTA_CLASS,
@@ -43,16 +46,6 @@ import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
-
-function isRelayMembershipDeniedError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return (
-    error.message.includes("You must be a relay member") ||
-    error.message.includes("relay_membership_required") ||
-    error.message.includes("restricted: not a relay member") ||
-    error.message.includes("invalid: you are not a relay member")
-  );
-}
 
 const STARTER_PERSONA_ANIMATIONS: Record<string, string> = {
   Fizz: "/onboarding/starter-team/fizz.png",
@@ -183,6 +176,10 @@ export function CommunityOnboardingFlow({
     React.useState(0);
   const [deniedPubkey, setDeniedPubkey] = React.useState("");
   const [isMembershipDenied, setIsMembershipDenied] = React.useState(false);
+  const [isAwaitingApproval, setIsAwaitingApproval] = React.useState(false);
+  const awaitingResumeRef = React.useRef<"dntls-skip" | "save-profile">(
+    "dntls-skip",
+  );
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] =
     React.useState(false);
   const [isCurtainFading, setIsCurtainFading] = React.useState(false);
@@ -306,6 +303,59 @@ export function CommunityOnboardingFlow({
   }, [isPending, update]);
 
   const isProfileStage = transaction?.stage === "profile";
+  const routeMembershipError = React.useCallback(async (error: unknown) => {
+    const view = membershipGateViewForError(error);
+    if (view == null) return false;
+    try {
+      const identity = await getIdentity();
+      setDeniedPubkey(identity.pubkey);
+    } catch {
+      setDeniedPubkey("");
+    }
+    if (view === "awaiting-approval") {
+      setIsMembershipDenied(false);
+      setIsAwaitingApproval(true);
+    } else {
+      setIsAwaitingApproval(false);
+      setIsMembershipDenied(true);
+    }
+    return true;
+  }, []);
+  const tryEnterAfterApproval = React.useCallback(async () => {
+    if (!transaction) return "pending";
+    if (awaitingResumeRef.current === "save-profile") {
+      const name = displayName.trim();
+      if (!name) return "pending";
+      try {
+        await updateProfile({ displayName: name });
+      } catch (error) {
+        const view = membershipGateViewForError(error);
+        if (view === "membership-denied") return "denied";
+        return "pending";
+      }
+    } else if (transaction.dntlsName) {
+      const status = await dntlsCredentialsStatus().catch(() => null);
+      const userName = status?.user_name;
+      if (!userName) {
+        setIsAwaitingApproval(false);
+        return "continue";
+      }
+      try {
+        await updateProfile({ displayName: userName });
+      } catch (error) {
+        const view = membershipGateViewForError(error);
+        if (view === "membership-denied") return "denied";
+        return "pending";
+      }
+    } else {
+      setIsAwaitingApproval(false);
+      return "continue";
+    }
+    setIsAwaitingApproval(false);
+    setTransitionDirection("forward");
+    update({ stage: "team-intro", error: undefined }, transaction.id);
+    return "continue";
+  }, [displayName, transaction, update]);
   // Skip the display-name step when the relay already has a profile, or when
   // this is a DNTLS community: the verified DNTLS name the user chose is
   // their name, so it is published as the display name without asking.
@@ -319,7 +369,15 @@ export function CommunityOnboardingFlow({
       update({ stage: "team-intro", error: undefined }, transaction.id);
     };
     void (async () => {
-      const profile = await getProfile().catch(() => null);
+      let profile = null;
+      try {
+        profile = await getProfile();
+      } catch (error) {
+        if (await routeMembershipError(error)) {
+          awaitingResumeRef.current = "dntls-skip";
+          return;
+        }
+      }
       if (profile?.hasProfileEvent) {
         skipToTeam();
         return;
@@ -331,14 +389,8 @@ export function CommunityOnboardingFlow({
       try {
         await updateProfile({ displayName: userName });
       } catch (error) {
-        if (isRelayMembershipDeniedError(error)) {
-          try {
-            const identity = await getIdentity();
-            setDeniedPubkey(identity.pubkey);
-          } catch {
-            setDeniedPubkey("");
-          }
-          setIsMembershipDenied(true);
+        if (await routeMembershipError(error)) {
+          awaitingResumeRef.current = "dntls-skip";
           return;
         }
         // Publishing failed for another reason: fall through to the manual
@@ -348,7 +400,7 @@ export function CommunityOnboardingFlow({
       }
       skipToTeam();
     })();
-  }, [isProfileStage, transaction, update]);
+  }, [isProfileStage, routeMembershipError, transaction, update]);
   const isTeamStage =
     transaction?.stage === "team-intro" ||
     transaction?.stage === "finalizing" ||
@@ -403,6 +455,58 @@ export function CommunityOnboardingFlow({
     return () => resizeObserver.disconnect();
   }, [isAvatarEditorOpen]);
 
+  React.useEffect(() => {
+    setIsAwaitingApproval(false);
+    setIsMembershipDenied(false);
+  }, [transaction?.id]);
+
+  React.useEffect(() => {
+    if (!isAwaitingApproval || !transaction) return;
+    let cancelled = false;
+
+    const showDenied = () => {
+      if (cancelled) return;
+      setIsAwaitingApproval(false);
+      setIsMembershipDenied(true);
+    };
+    const resume = () => {
+      if (cancelled) return;
+      void tryEnterAfterApproval().then((result) => {
+        if (cancelled) return;
+        if (result === "denied") showDenied();
+      });
+    };
+    const classifyError = (error: unknown) => {
+      if (membershipGateViewForError(error) === "membership-denied") {
+        showDenied();
+      }
+    };
+
+    void relayClient.preconnect().catch(classifyError);
+    const unsub = relayClient.subscribeToConnectionState((state) => {
+      if (cancelled) return;
+      if (state === "connected") resume();
+      if (state === "disconnected") {
+        void relayClient.preconnect().catch(classifyError);
+      }
+    });
+    const stop = startAwaitingApprovalRetry({
+      attempt: tryEnterAfterApproval,
+      onContinue: () => {},
+      onDenied: showDenied,
+    });
+
+    return () => {
+      cancelled = true;
+      unsub();
+      stop();
+    };
+  }, [
+    isAwaitingApproval,
+    transaction,
+    tryEnterAfterApproval,
+  ]);
+
   if (!transaction) return null;
 
   if (isMembershipDenied) {
@@ -436,6 +540,34 @@ export function CommunityOnboardingFlow({
                 stage: "connecting",
                 error: undefined,
               });
+              setIsMembershipDenied(false);
+              setIsAwaitingApproval(false);
+            }}
+          />
+        ) : null}
+      </>
+    );
+  }
+
+  if (isAwaitingApproval) {
+    return (
+      <>
+        <AwaitingApproval
+          activeRelayUrl={transaction.relayUrl}
+          communityHint={transaction.dntlsName ?? transaction.communityName}
+          onChangeCommunity={() => setIsCommunityChangeOpen(true)}
+        />
+        {isCommunityChangeOpen ? (
+          <CommunityChangeOverlay
+            onClose={() => setIsCommunityChangeOpen(false)}
+            onUpdated={(communityName, updatedRelayUrl) => {
+              update({
+                communityName,
+                relayUrl: updatedRelayUrl,
+                stage: "connecting",
+                error: undefined,
+              });
+              setIsAwaitingApproval(false);
               setIsMembershipDenied(false);
             }}
           />
@@ -479,14 +611,8 @@ export function CommunityOnboardingFlow({
       setTransitionDirection("forward");
       update({ stage: "team-intro", error: undefined });
     } catch (error) {
-      if (isRelayMembershipDeniedError(error)) {
-        try {
-          const identity = await getIdentity();
-          setDeniedPubkey(identity.pubkey);
-        } catch {
-          setDeniedPubkey("");
-        }
-        setIsMembershipDenied(true);
+      if (await routeMembershipError(error)) {
+        awaitingResumeRef.current = "save-profile";
         return;
       }
       update({ error: error instanceof Error ? error.message : String(error) });

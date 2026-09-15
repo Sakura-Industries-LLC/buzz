@@ -3,7 +3,12 @@ import test from "node:test";
 
 import {
   AuthOkTracker,
+  DNTLS_APPROVAL_PENDING_CODE,
+  DNTLS_APPROVAL_PENDING_REASON,
   MAX_CONSECUTIVE_AUTH_REJECTIONS,
+  PENDING_AUTH_RETRY_MS,
+  authReconnectDelayMs,
+  isDntlsApprovalPendingReason,
 } from "./relayAuthPolicy.ts";
 
 test("success resolves authenticated and resets the streak", () => {
@@ -89,5 +94,63 @@ test("already-authenticated wins even past the cap (session is usable)", () => {
   assert.equal(
     tracker.record(false, "auth-required: already authenticated"),
     "authenticated",
+  );
+});
+
+test("pending DNTLS approval retries without latching past the streak cap", () => {
+  const tracker = new AuthOkTracker();
+  let decision = "retry";
+  for (let i = 0; i < MAX_CONSECUTIVE_AUTH_REJECTIONS + 8; i++) {
+    decision = tracker.record(false, DNTLS_APPROVAL_PENDING_REASON);
+  }
+  assert.equal(decision, "retry");
+  assert.equal(
+    tracker.record(false, `relay returned 403: ${DNTLS_APPROVAL_PENDING_CODE}`),
+    "retry",
+  );
+});
+
+test("ordinary membership denial is terminal after a pending wait", () => {
+  const tracker = new AuthOkTracker();
+  for (let i = 0; i < 6; i++) {
+    assert.equal(
+      tracker.record(false, DNTLS_APPROVAL_PENDING_REASON),
+      "retry",
+    );
+  }
+  assert.equal(
+    tracker.record(false, "restricted: not a relay member"),
+    "terminal",
+  );
+});
+
+test("pending approval does not consume the verification-failure streak", () => {
+  const tracker = new AuthOkTracker();
+  tracker.record(false, "auth-required: verification failed");
+  tracker.record(false, "auth-required: verification failed");
+  for (let i = 0; i < 10; i++) {
+    tracker.record(false, DNTLS_APPROVAL_PENDING_REASON);
+  }
+  assert.equal(
+    tracker.record(false, "auth-required: verification failed"),
+    "terminal",
+  );
+});
+
+test("pending AUTH uses the fixed reconnect cadence", () => {
+  assert.equal(
+    authReconnectDelayMs(DNTLS_APPROVAL_PENDING_REASON),
+    PENDING_AUTH_RETRY_MS,
+  );
+  assert.equal(authReconnectDelayMs("restricted: not a relay member"), undefined);
+  assert.equal(
+    isDntlsApprovalPendingReason(
+      `relay returned 403: ${DNTLS_APPROVAL_PENDING_CODE}`,
+    ),
+    true,
+  );
+  assert.equal(
+    isDntlsApprovalPendingReason("restricted: not a relay member"),
+    false,
   );
 });
