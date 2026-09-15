@@ -11595,8 +11595,7 @@ export function maybeInstallE2eTauriMocks() {
               "That code is not valid. Codes work once and expire; export a new one.",
           };
         }
-        const name =
-          activeConfig?.mock?.dntlsRedeemName ?? "demo-alice.dntls";
+        const name = activeConfig?.mock?.dntlsRedeemName ?? "demo-alice.dntls";
         if (activeConfig) {
           activeConfig.mock = {
             ...activeConfig.mock,
