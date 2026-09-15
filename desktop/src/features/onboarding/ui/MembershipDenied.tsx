@@ -14,6 +14,8 @@ import { writeTextToClipboard } from "@/shared/lib/clipboard";
 type MembershipDeniedProps = {
   /** The relay that denied membership — used as the target for bare-code invites. */
   activeRelayUrl: string;
+  /** Show declined-request recovery for a verified DNTLS community caller. */
+  dntlsDeclined?: boolean;
   onBack: () => void;
   onChangeCommunity: () => void;
   onImportKey: (nsec: string) => Promise<void>;
@@ -23,6 +25,7 @@ type MembershipDeniedProps = {
 
 export function MembershipDenied({
   activeRelayUrl,
+  dntlsDeclined = false,
   onBack,
   onChangeCommunity,
   onImportKey,
@@ -104,53 +107,58 @@ export function MembershipDenied({
       <StartupWindowDragRegion />
       <div className="w-full max-w-md rounded-[28px] border border-border/70 bg-background/92 p-8 shadow-2xl backdrop-blur-sm">
         <div className="space-y-3">
-          <Badge variant="warning">Membership required</Badge>
+          <Badge variant="warning">
+            {dntlsDeclined ? "Declined" : "Membership required"}
+          </Badge>
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-destructive/10">
               <ShieldX className="h-4 w-4 text-destructive" />
             </div>
             <h1 className="text-2xl font-semibold tracking-tight text-foreground">
-              Not a member yet
+              {dntlsDeclined ? "Request declined" : "Not a member yet"}
             </h1>
           </div>
           <p className="text-sm leading-6 text-muted-foreground">
-            This relay requires an invitation. Ask a relay admin to add you as a
-            member, then come back and try again.
+            {dntlsDeclined
+              ? "An admin declined this request. Contact a community admin if you think this is a mistake, or join a different community."
+              : "This relay requires an invitation. Ask a relay admin to add you as a member, then come back and try again."}
           </p>
         </div>
 
-        <div className="mt-6 space-y-3">
-          <div className="space-y-1.5">
-            <p className="text-xs font-medium text-muted-foreground">
-              Your public key (npub)
-            </p>
-            <div className="flex items-center gap-2">
-              <code className="min-w-0 flex-1 truncate rounded-xl border border-border/70 bg-muted/30 px-3 py-2.5 font-mono text-xs text-foreground">
-                {npub}
-              </code>
-              <Button
-                className="shrink-0"
-                onClick={() => {
-                  void handleCopy();
-                }}
-                size="icon"
-                title="Copy npub"
-                type="button"
-                variant="outline"
-              >
-                {copied ? (
-                  <Check className="h-4 w-4 text-emerald-500" />
-                ) : (
-                  <Copy className="h-4 w-4" />
-                )}
-              </Button>
+        {dntlsDeclined ? null : (
+          <div className="mt-6 space-y-3">
+            <div className="space-y-1.5">
+              <p className="text-xs font-medium text-muted-foreground">
+                Your public key (npub)
+              </p>
+              <div className="flex items-center gap-2">
+                <code className="min-w-0 flex-1 truncate rounded-xl border border-border/70 bg-muted/30 px-3 py-2.5 font-mono text-xs text-foreground">
+                  {npub}
+                </code>
+                <Button
+                  className="shrink-0"
+                  onClick={() => {
+                    void handleCopy();
+                  }}
+                  size="icon"
+                  title="Copy npub"
+                  type="button"
+                  variant="outline"
+                >
+                  {copied ? (
+                    <Check className="h-4 w-4 text-emerald-500" />
+                  ) : (
+                    <Copy className="h-4 w-4" />
+                  )}
+                </Button>
+              </div>
             </div>
+            <p className="text-xs leading-5 text-muted-foreground">
+              This is your public identity — it&apos;s safe to share. Send it to
+              the relay admin so they can invite you.
+            </p>
           </div>
-          <p className="text-xs leading-5 text-muted-foreground">
-            This is your public identity — it&apos;s safe to share. Send it to
-            the relay admin so they can invite you.
-          </p>
-        </div>
+        )}
 
         <div className="mt-6 flex flex-col gap-2">
           {isInviteFormOpen ? (
@@ -268,27 +276,31 @@ export function MembershipDenied({
                   Change community
                 </Button>
               </div>
-              <button
-                className="flex w-full items-center justify-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
-                data-testid="membership-denied-redeem-invite"
-                onClick={() => setIsInviteFormOpen(true)}
-                type="button"
-              >
-                <Ticket className="h-4 w-4" />
-                Have an invite?
-              </button>
-              <button
-                className="flex w-full items-center justify-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
-                data-testid="membership-denied-change-key"
-                onClick={() => {
-                  setImportError(null);
-                  setIsImportFormOpen(true);
-                }}
-                type="button"
-              >
-                <KeyRound className="h-4 w-4" />
-                Use a different key
-              </button>
+              {dntlsDeclined ? null : (
+                <>
+                  <button
+                    className="flex w-full items-center justify-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                    data-testid="membership-denied-redeem-invite"
+                    onClick={() => setIsInviteFormOpen(true)}
+                    type="button"
+                  >
+                    <Ticket className="h-4 w-4" />
+                    Have an invite?
+                  </button>
+                  <button
+                    className="flex w-full items-center justify-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                    data-testid="membership-denied-change-key"
+                    onClick={() => {
+                      setImportError(null);
+                      setIsImportFormOpen(true);
+                    }}
+                    type="button"
+                  >
+                    <KeyRound className="h-4 w-4" />
+                    Use a different key
+                  </button>
+                </>
+              )}
             </>
           )}
         </div>

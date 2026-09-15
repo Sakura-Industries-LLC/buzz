@@ -120,8 +120,16 @@ async function expectAwaitingApprovalWithoutProfile(
 async function expectMembershipDeniedWithoutProfile(page: Page) {
   await expect(page.getByTestId("membership-denied")).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Not a member yet" }),
+    page.getByRole("heading", { name: "Request declined" }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Not a member yet" }),
+  ).toHaveCount(0);
+  await expect(page.getByText("Your public key (npub)")).toHaveCount(0);
+  await expect(page.getByTestId("membership-denied-redeem-invite")).toHaveCount(
+    0,
+  );
+  await expect(page.getByTestId("membership-denied-change-key")).toHaveCount(0);
   await expect(
     page.getByRole("heading", { name: "Build your profile" }),
   ).toHaveCount(0);
@@ -196,7 +204,7 @@ for (const [name, mock, clear] of [
   });
 }
 
-test("pending first DNTLS join rejection shows MembershipDenied without profile", async ({
+test("pending first DNTLS join rejection shows declined request without profile", async ({
   page,
 }) => {
   await bootFirstCommunity(page);
@@ -215,4 +223,19 @@ test("pending first DNTLS join rejection shows MembershipDenied without profile"
   await expect
     .poll(async () => (await readOnboardingTransaction(page))?.stage ?? null)
     .toBe("connecting");
+});
+
+test("approved DNTLS reinstall needs no further membership approval", async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  await bootFirstCommunity(page);
+  await joinFirstDntlsCommunity(page);
+  await expect(
+    page.getByRole("button", { name: "Take me to Buzz" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("awaiting-approval")).toHaveCount(0);
+  await expect(page.getByTestId("membership-denied")).toHaveCount(0);
+  await page.getByRole("button", { name: "Take me to Buzz" }).click();
+  await expectAutoEntered(page);
 });
