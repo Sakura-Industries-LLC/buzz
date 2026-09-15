@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::rustls::pki_types::ServerName;
@@ -27,7 +27,9 @@ use url::{Host, Url};
 use dntls_sdk::portal::{AddressFamily, BuzzEndpoint, RecordFields};
 use dntls_sdk::{identity, resolver, tls};
 
-use crate::dntls_credentials::{credentials_bundle_path, credentials_data_dir};
+use crate::dntls_credentials::{
+    credentials_bundle_path, credentials_data_dir, refresh_credentials, DntlsError,
+};
 
 const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ENDPOINTS: usize = 8;
@@ -47,6 +49,8 @@ struct RunningConnector {
 pub(crate) struct DntlsConnectors {
     /// Shared connector table.
     running: Arc<Mutex<HashMap<String, RunningConnector>>>,
+    /// Serializes identity changes with connector startup and credential refresh.
+    pub(crate) operation: tokio::sync::Mutex<()>,
 }
 
 impl DntlsConnectors {
@@ -95,19 +99,13 @@ pub(crate) async fn start_dntls_connector(
     app: AppHandle,
     community: String,
     state: State<'_, DntlsConnectors>,
-) -> Result<ConnectorReady, String> {
+) -> Result<ConnectorReady, DntlsError> {
     let community = normalize_dntls_name(&community)?;
+    let _guard = state.operation.lock().await;
     if let Some(ready) = lookup(&state.running, &community)? {
         return Ok(ready);
     }
-    let credentials = credentials_bundle_path(&app)?;
-    if !credentials.is_file() {
-        return Err("choose a DNTLS credentials file before adding this community".to_string());
-    }
-    let data_dir = credentials_data_dir(&app)?;
-
-    let (resolver, handshaker) = clients(&credentials, data_dir)?;
-    let verified = discover(&community, resolver, handshaker).await?;
+    let verified = discover_with_refresh(&app, &community).await?;
     let listener = TcpListener::bind((IpAddr::from([127, 0, 0, 1]), 0))
         .await
         .map_err(|error| format!("could not open the DNTLS loopback listener: {error}"))?;
@@ -130,7 +128,9 @@ pub(crate) async fn start_dntls_connector(
         // A concurrent start won; serve that listener and drop ours.
         return Ok(existing.ready.clone());
     }
-    let task = tauri::async_runtime::spawn(accept_loop(listener, community.clone(), verified));
+    let task = tauri::async_runtime::spawn(accept_loop(
+        app, listener, community.clone(), verified,
+    ));
     running.insert(
         community,
         RunningConnector {
@@ -149,6 +149,40 @@ fn lookup(
         .lock()
         .map_err(|_| "DNTLS connector state is unavailable".to_string())?;
     Ok(running.get(community).map(|c| c.ready.clone()))
+}
+
+/// Tries the stored identity, refreshing only when its own fresh certificate
+/// no longer matches the authenticated network record. Transport failures do
+/// not establish staleness and never cause a Portal sign-in.
+async fn discover_with_refresh(app: &AppHandle, community: &str) -> Result<Verified, DntlsError> {
+    let path = credentials_bundle_path(app)?;
+    if !path.is_file() {
+        return Err(DntlsError::new("credentials_changed", "Connect your DNTLS name before adding this community."));
+    }
+    let data_dir = credentials_data_dir(app)?;
+    let (resolver, handshaker) = clients(&path, data_dir.clone())?;
+    let failure = match discover(community, resolver.clone(), handshaker).await {
+        Ok(verified) => return Ok(verified),
+        Err(error) => error,
+    };
+    let data = zeroize::Zeroizing::new(std::fs::read(&path)
+        .map_err(|error| format!("read DNTLS credentials: {error}"))?);
+    let credentials = identity::decode_credentials(&data)
+        .map_err(|_| "Stored credentials are not a valid DNTLS bundle.".to_string())?;
+    let certificate = credentials.tls_certificate(None, time::Duration::ZERO)
+        .map_err(|error| error.to_string())?;
+    let freshness = identity::verify_certificate(resolver.as_ref(), certificate.der(), None).await;
+    if !matches!(&freshness, Err(error) if error.classification() == Some(identity::Classification::CertificateUnverified)) {
+        return Err(failure.into());
+    }
+    if let Err(error) = refresh_credentials(&path, &credentials).await {
+        if error.code == "credentials_changed" {
+            let _ = app.emit("dntls-credentials-changed", ());
+        }
+        return Err(error);
+    }
+    let (resolver, handshaker) = clients(&path, data_dir)?;
+    discover(community, resolver, handshaker).await.map_err(Into::into)
 }
 
 /// Loads the stored credential bundle and builds the resolver client for
@@ -361,30 +395,57 @@ async fn dial(
 
 /// Splices each accepted loopback connection onto its own DNTLS TLS
 /// connection to the verified relay endpoint.
-async fn accept_loop(listener: TcpListener, community: String, verified: Verified) {
+async fn accept_loop(app: AppHandle, listener: TcpListener, community: String, verified: Verified) {
+    let verified = Arc::new(tokio::sync::RwLock::new(verified));
+    // Dropping the accept loop also aborts established streams on Replace/Remove.
+    let mut connections = tokio::task::JoinSet::new();
     loop {
-        let (local, _) = match listener.accept().await {
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+        };
+        let (mut local, _) = match accepted {
             Ok(accepted) => accepted,
             Err(error) => {
                 eprintln!("buzz-desktop: dntls_connector {community}: accept failed: {error}");
                 continue;
             }
         };
+        let app = app.clone();
         let community = community.clone();
         let verified = verified.clone();
-        tauri::async_runtime::spawn(async move {
-            let mut local = local;
-            let mut remote = match dial(&community, verified.addr, &verified.handshaker).await {
+        connections.spawn(async move {
+            let current = verified.read().await.clone();
+            let mut remote = match dial(&community, current.addr, &current.handshaker).await {
                 Ok(stream) => stream,
-                Err(error) => {
-                    eprintln!(
-                        "buzz-desktop: dntls_connector {community}: relay unavailable: {error}"
-                    );
-                    return;
+                Err(_) => {
+                    let state = app.state::<DntlsConnectors>();
+                    let _guard = state.operation.lock().await;
+                    let updated = match discover_with_refresh(&app, &community).await {
+                        Ok(updated) => updated,
+                        Err(error) => {
+                            eprintln!("buzz-desktop: DNTLS connection unavailable: {}", error.code);
+                            return;
+                        }
+                    };
+                    let result = dial(&community, updated.addr, &updated.handshaker).await;
+                    *verified.write().await = updated;
+                    match result {
+                        Ok(stream) => stream,
+                        Err(_) => return,
+                    }
                 }
             };
-            // Ordinary disconnects surface here too; nothing to report.
-            let _ = tokio::io::copy_bidirectional(&mut local, &mut remote).await;
+            // TLS 1.3 can report a refused client certificate on the first read,
+            // after connect returns. Refresh for the next connection; never replay
+            // application bytes that may already have reached the community.
+            if tokio::io::copy_bidirectional(&mut local, &mut remote).await.is_err() {
+                let state = app.state::<DntlsConnectors>();
+                let _guard = state.operation.lock().await;
+                if let Ok(updated) = discover_with_refresh(&app, &community).await {
+                    *verified.write().await = updated;
+                }
+            }
         });
     }
 }

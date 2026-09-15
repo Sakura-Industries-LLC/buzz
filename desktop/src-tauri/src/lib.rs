@@ -228,7 +228,6 @@ pub fn run() {
         .manage(PendingNavigationDeepLinks::default())
         .manage(PendingEntityDeepLinks::default())
         .manage(dntls_connector::DntlsConnectors::default())
-        .manage(dntls_credentials::DntlsResolver::default())
         .manage(BuilderlabSession::default())
         .manage(BuilderlabLogin::default())
         .manage(commands::pairing::PairingHandle::new())
@@ -239,6 +238,7 @@ pub fn run() {
         .manage(channel_head_cache::ChannelHeadCacheStore::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
+            dntls_credentials::remove_obsolete_state(&app_handle)?;
             // BUZZ_OPEN_DEVTOOLS=1 opens the WebKit inspector at boot in debug
             // builds, for driving the app from a terminal without Safari.
             #[cfg(debug_assertions)]
@@ -547,9 +547,7 @@ pub fn run() {
             acknowledge_pending_entity_deep_link,
             dntls_connector::start_dntls_connector,
             dntls_credentials::dntls_credentials_status,
-            dntls_credentials::dntls_resolver_status,
-            dntls_credentials::list_dntls_identities,
-            dntls_credentials::bind_dntls_identity,
+            dntls_credentials::redeem_dntls_credential_code,
             dntls_credentials::remove_dntls_credentials,
             start_builderlab_login,
             cancel_builderlab_login,
