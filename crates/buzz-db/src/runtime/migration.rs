@@ -690,7 +690,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 41);
+        assert_eq!(migrations.len(), 42);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1241,6 +1241,13 @@ mod tests {
         assert!(dntls_applications.contains("status IN ('pending', 'approved')"));
         assert!(!dntls_applications.contains("_operator_global_tables"));
         assert!(desired_schema.contains("CREATE TABLE dntls_applications"));
+
+        assert_eq!(migrations[41].version, 42);
+        let rejected = migrations[41].sql.as_str();
+        assert!(rejected.contains("rejected"));
+        assert!(!rejected.contains("dntls_applications_live_fqdn_idx"));
+        assert!(desired_schema.contains("status IN ('pending', 'approved', 'rejected')"));
+        assert!(desired_schema.contains("UNIQUE (community_id, fqdn)"));
     }
 
     #[test]

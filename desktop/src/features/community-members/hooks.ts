@@ -1,5 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { useCommunities } from "@/features/communities/useCommunities";
+import {
+  DNTLS_PENDING_REFETCH_INTERVAL_MS,
+  dntlsPendingApplicationsQueryKey,
+  removePendingDntlsApplication,
+} from "@/features/community-members/lib/dntlsRequests";
+import { dntlsNamesQueryKey } from "@/features/profile/useDntlsNames";
+import {
+  approveDntlsApplication,
+  listPendingDntlsApplications,
+  rejectDntlsApplication,
+  type ListPendingDntlsApplicationsResult,
+} from "@/shared/api/dntls";
 import {
   addRelayMember,
   changeRelayMemberRole,
@@ -15,6 +28,7 @@ export const myRelayMembershipQueryKey = ["myRelayMembership"] as const;
 export const myRelayMembershipLookupQueryKey = [
   "myRelayMembershipLookup",
 ] as const;
+export { dntlsPendingApplicationsQueryKey, DNTLS_PENDING_REFETCH_INTERVAL_MS };
 
 export function useRelayMembersQuery(enabled = true) {
   return useQuery({
@@ -155,6 +169,84 @@ export function useChangeRelayMemberRoleMutation() {
         queryClient.invalidateQueries({
           queryKey: myRelayMembershipLookupQueryKey,
         }),
+      ]);
+    },
+  });
+}
+
+export function useDntlsPendingApplicationsQuery(enabled: boolean) {
+  const { activeCommunity } = useCommunities();
+  const relayUrl = activeCommunity?.relayUrl ?? "";
+
+  return useQuery({
+    enabled: enabled && relayUrl.length > 0,
+    queryKey: dntlsPendingApplicationsQueryKey(relayUrl),
+    queryFn: listPendingDntlsApplications,
+    refetchInterval: DNTLS_PENDING_REFETCH_INTERVAL_MS,
+    retry: false,
+  });
+}
+
+export function useDecideDntlsApplicationMutation() {
+  const queryClient = useQueryClient();
+  const { activeCommunity } = useCommunities();
+  const relayUrl = activeCommunity?.relayUrl ?? "";
+
+  return useMutation({
+    mutationFn: ({
+      pubkey,
+      decision,
+    }: {
+      pubkey: string;
+      decision: "approve" | "reject";
+    }) =>
+      decision === "approve"
+        ? approveDntlsApplication(pubkey)
+        : rejectDntlsApplication(pubkey),
+    onMutate: async ({ pubkey }) => {
+      const pendingKey = dntlsPendingApplicationsQueryKey(relayUrl);
+      const namesKey = dntlsNamesQueryKey(relayUrl);
+      await queryClient.cancelQueries({ queryKey: pendingKey });
+      const previousPending =
+        queryClient.getQueryData<ListPendingDntlsApplicationsResult>(
+          pendingKey,
+        );
+
+      queryClient.setQueryData<ListPendingDntlsApplicationsResult>(
+        pendingKey,
+        (old) => removePendingDntlsApplication(old, pubkey),
+      );
+      return { pendingKey, namesKey, previousPending };
+    },
+    onError: (_err, { pubkey }, context) => {
+      const previous = context?.previousPending;
+      if (!context || previous?.status !== "ok") return;
+      const application = previous.applications.find(
+        (entry) => entry.pubkey === pubkey,
+      );
+      if (!application) return;
+      queryClient.setQueryData<ListPendingDntlsApplicationsResult>(
+        context.pendingKey,
+        (current) =>
+          current?.status === "ok" &&
+          !current.applications.some((entry) => entry.pubkey === pubkey)
+            ? {
+                status: "ok",
+                applications: [...current.applications, application].sort(
+                  (a, b) => a.createdAt - b.createdAt,
+                ),
+              }
+            : current,
+      );
+    },
+    onSettled: async (_data, _err, _vars, context) => {
+      const pendingKey =
+        context?.pendingKey ?? dntlsPendingApplicationsQueryKey(relayUrl);
+      const namesKey = context?.namesKey ?? dntlsNamesQueryKey(relayUrl);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: pendingKey }),
+        queryClient.invalidateQueries({ queryKey: namesKey }),
+        queryClient.invalidateQueries({ queryKey: relayMembersQueryKey }),
       ]);
     },
   });

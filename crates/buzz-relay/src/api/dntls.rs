@@ -11,14 +11,18 @@
 //! their admin role follows the binding, while displaced keys retain ordinary
 //! membership and owners keep their role. Unlisted names retain their existing
 //! roles on rebind. A key already approved for another name cannot take a second
-//! mapping. Other `approve` connections cannot replace another key's mapping.
+//! mapping. Other `approve` connections cannot replace a pending or approved
+//! mapping, but a newly verified key may replace a rejected mapping.
 //!
 //! HTTP routes (all NIP-98 signed, outside the Nostr event data plane):
 //!
 //! - `GET /api/dntls/pending` — list pending applications. Owner/admin only.
-//! - `POST /api/dntls/approve` — admit a pending pubkey through the same
-//!   membership path invite claims use, and retain the verified-name mapping.
-//! - `POST /api/dntls/reject` — delete a pending application. Owner/admin only.
+//! - `POST /api/dntls/approve` — admit a pending or rejected pubkey through the
+//!   same membership path invite claims use, and retain the verified-name mapping.
+//! - `POST /api/dntls/reject` — mark a pending application rejected. Owner/admin
+//!   only. The same pubkey cannot requeue while rejected. A different key proving
+//!   the same name replaces the rejected row with a new pending application.
+//!   Approve recovers a rejected row until it is replaced (no un-reject UI).
 //! - `GET /api/dntls/names` — list approved pubkey→fqdn mappings. Any member.
 //!
 //! Feature-gated by `BUZZ_DNTLS_ADMISSION`. When `off` (default), every route
@@ -48,6 +52,10 @@ const NAMES_PATH: &str = "/api/dntls/names";
 
 /// NOTICE sent when an existing mapping prevents admission.
 pub(crate) const NAME_ALREADY_CLAIMED_NOTICE: &str = "dntls: name already claimed";
+/// NIP-42 OK reason when a matching `approve` application is still pending.
+pub(crate) const AUTH_APPROVAL_PENDING: &str = "restricted: dntls approval pending";
+/// HTTP 403 `error` when a matching `approve` application is still pending.
+pub(crate) const HTTP_APPROVAL_PENDING: &str = "dntls_approval_pending";
 
 const DNTLS_NAME_HEADER: &str = crate::dntls::NAME_HEADER;
 const MAX_FQDN_LEN: usize = 255;
@@ -201,6 +209,7 @@ pub(crate) async fn apply_connection_admission(
                 .map_err(|e| format!("dntls pending upsert: {e}"))?
             {
                 buzz_db::dntls::UpsertJoinOutcome::Pending
+                | buzz_db::dntls::UpsertJoinOutcome::Rejected
                 | buzz_db::dntls::UpsertJoinOutcome::Bound { .. } => Ok(AdmissionEffect::Applied),
                 buzz_db::dntls::UpsertJoinOutcome::NameAlreadyClaimed => {
                     Ok(AdmissionEffect::NameClaimed)
@@ -223,7 +232,8 @@ pub(crate) async fn apply_connection_admission(
                 buzz_db::dntls::UpsertJoinOutcome::NameAlreadyClaimed => {
                     Ok(AdmissionEffect::NameClaimed)
                 }
-                buzz_db::dntls::UpsertJoinOutcome::Pending => {
+                buzz_db::dntls::UpsertJoinOutcome::Pending
+                | buzz_db::dntls::UpsertJoinOutcome::Rejected => {
                     Err("dntls approved upsert returned a pending application".to_string())
                 }
                 buzz_db::dntls::UpsertJoinOutcome::Bound {
@@ -311,6 +321,39 @@ pub(crate) async fn apply_http_admission(
     }
 }
 
+/// True when a membership denial should name a pending DNTLS application.
+///
+/// Only [`DntlsAdmission::Approve`] looks up: `auto`/`off` stay on the ordinary
+/// membership path with no extra query. A pending row counts only when this
+/// pubkey's application is `pending` for the same verified name.
+pub(crate) async fn matching_pending_application(
+    state: &AppState,
+    community: buzz_core::tenant::CommunityId,
+    pubkey_hex: &str,
+    fqdn: Option<&str>,
+) -> bool {
+    if state.config.dntls_admission != DntlsAdmission::Approve {
+        return false;
+    }
+    let Some(fqdn) = fqdn.map(str::trim).filter(|name| !name.is_empty()) else {
+        return false;
+    };
+    let fqdn = fqdn.to_ascii_lowercase();
+    match state.db.get_dntls_application(community, pubkey_hex).await {
+        Ok(Some(row)) => row.status == "pending" && row.fqdn == fqdn,
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(
+                community = %community,
+                pubkey = %pubkey_hex,
+                error = %error,
+                "DNTLS pending lookup failed; using generic membership denial"
+            );
+            false
+        }
+    }
+}
+
 /// List pending applications — `GET /api/dntls/pending`.
 pub async fn pending(
     State(state): State<Arc<AppState>>,
@@ -358,7 +401,8 @@ pub async fn approve(
         .get_dntls_application(tenant.community(), &target)
         .await
         .map_err(|e| super::internal_error(&format!("dntls approve lookup: {e}")))?;
-    let Some(existing) = existing.filter(|row| row.status == "pending") else {
+    let Some(existing) = existing.filter(|row| row.status == "pending" || row.status == "rejected")
+    else {
         return Err(super::api_error(
             StatusCode::NOT_FOUND,
             "application_not_found",
@@ -394,6 +438,9 @@ pub async fn approve(
 }
 
 /// Reject a pending application — `POST /api/dntls/reject`.
+///
+/// Sets status to `rejected`. The same pubkey's next AUTH is a generic
+/// membership denial and does not recreate a pending row.
 pub async fn reject(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -439,6 +486,7 @@ pub async fn names(
         headers
             .get("x-auth-tag")
             .and_then(|value| value.to_str().ok()),
+        verified_name_from_headers(&headers).as_deref(),
     )
     .await?;
 
@@ -1156,9 +1204,15 @@ mod tests {
             .await
             .expect("requires reachable Postgres and relay test state");
 
-        let (ok, _messages) =
+        let (ok, messages) =
             auth_connection(state.clone(), &host, &joiner, Some("alice.example")).await;
         assert!(!ok, "approve mode must not auto-admit");
+        assert!(
+            messages
+                .iter()
+                .any(|msg| msg.contains(AUTH_APPROVAL_PENDING)),
+            "{messages:?}"
+        );
 
         let community = state
             .db
@@ -1427,7 +1481,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn dntls_reject_deletes_pending_row() {
+    async fn dntls_reject_persists_rejected_row() {
         let host = format!("dntls-reject-row-{}.example", Uuid::new_v4().simple());
         let owner = Keys::generate();
         let joiner = Keys::generate();
@@ -1466,12 +1520,20 @@ mod tests {
         .await;
         assert_eq!(rejected.status(), StatusCode::OK);
 
-        let missing = state
+        let row = state
             .db
             .get_dntls_application(community.id, &joiner.public_key().to_hex())
             .await
-            .expect("lookup");
-        assert!(missing.is_none());
+            .expect("lookup")
+            .expect("rejected row");
+        assert_eq!(row.status, "rejected");
+        assert_eq!(row.fqdn, "alice.example");
+        assert!(state
+            .db
+            .list_dntls_applications(community.id, "pending")
+            .await
+            .expect("pending list")
+            .is_empty());
 
         let again = send(
             state,
@@ -1640,7 +1702,7 @@ mod tests {
         let json = read_json(response).await;
         assert_eq!(
             json.get("error").and_then(Value::as_str),
-            Some("relay_membership_required")
+            Some(HTTP_APPROVAL_PENDING)
         );
 
         let community = state
@@ -1709,5 +1771,338 @@ mod tests {
             .await
             .expect("lookup");
         assert!(row.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_approve_auth_pending_requires_matching_name_and_key() {
+        let host = format!("dntls-pending-match-{}.example", Uuid::new_v4().simple());
+        let joiner = Keys::generate();
+        let other = Keys::generate();
+        let state = dntls_test_state(&host, DntlsAdmission::Approve)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+
+        let (ok, messages) =
+            auth_connection(state.clone(), &host, &joiner, Some("alice.example")).await;
+        assert!(!ok, "{messages:?}");
+        assert!(
+            messages
+                .iter()
+                .any(|msg| msg.contains(AUTH_APPROVAL_PENDING)),
+            "{messages:?}"
+        );
+
+        let (ok, messages) = auth_connection(state.clone(), &host, &joiner, None).await;
+        assert!(!ok, "{messages:?}");
+        assert!(
+            messages
+                .iter()
+                .any(|msg| msg.contains("restricted: not a relay member")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|msg| !msg.contains(AUTH_APPROVAL_PENDING)),
+            "{messages:?}"
+        );
+
+        let (ok, messages) = auth_connection(state, &host, &other, Some("alice.example")).await;
+        assert!(!ok, "{messages:?}");
+        assert!(
+            messages
+                .iter()
+                .any(|msg| msg.contains("restricted: not a relay member")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|msg| !msg.contains(AUTH_APPROVAL_PENDING)),
+            "{messages:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_non_approve_auth_keeps_generic_membership_denial() {
+        for (admission, name) in [
+            (DntlsAdmission::Off, Some("alice.example")),
+            (DntlsAdmission::Auto, None),
+        ] {
+            let host = format!("dntls-generic-auth-{}.example", Uuid::new_v4().simple());
+            let joiner = Keys::generate();
+            let state = dntls_test_state(&host, admission)
+                .await
+                .expect("requires reachable Postgres and relay test state");
+            let (ok, messages) = auth_connection(state, &host, &joiner, name).await;
+            assert!(!ok, "{admission:?}: {messages:?}");
+            assert!(
+                messages
+                    .iter()
+                    .any(|msg| msg.contains("restricted: not a relay member")),
+                "{admission:?}: {messages:?}"
+            );
+            assert!(
+                messages
+                    .iter()
+                    .all(|msg| !msg.contains(AUTH_APPROVAL_PENDING)),
+                "{admission:?}: {messages:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_approve_http_pending_requires_matching_name_and_key() {
+        let host = format!("dntls-nip98-match-{}.example", Uuid::new_v4().simple());
+        let joiner = Keys::generate();
+        let other = Keys::generate();
+        let state = dntls_test_state_on(&host, DntlsAdmission::Approve, TEST_REDIS_URL)
+            .await
+            .expect("requires reachable Postgres, Redis, and relay test state");
+
+        let response = send_with_dntls(
+            state.clone(),
+            &host,
+            Method::POST,
+            "/query",
+            &joiner,
+            "[]".to_string(),
+            Some("alice.example"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("error")
+                .and_then(Value::as_str),
+            Some(HTTP_APPROVAL_PENDING)
+        );
+
+        let response = send_with_dntls(
+            state.clone(),
+            &host,
+            Method::POST,
+            "/query",
+            &joiner,
+            "[]".to_string(),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("error")
+                .and_then(Value::as_str),
+            Some("relay_membership_required")
+        );
+
+        let response = send_with_dntls(
+            state,
+            &host,
+            Method::POST,
+            "/query",
+            &other,
+            "[]".to_string(),
+            Some("alice.example"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("error")
+                .and_then(Value::as_str),
+            Some("relay_membership_required")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_non_approve_http_keeps_generic_membership_denial() {
+        for (admission, name) in [
+            (DntlsAdmission::Off, Some("alice.example")),
+            (DntlsAdmission::Auto, None),
+        ] {
+            let host = format!("dntls-generic-http-{}.example", Uuid::new_v4().simple());
+            let joiner = Keys::generate();
+            let state = dntls_test_state_on(&host, admission, TEST_REDIS_URL)
+                .await
+                .expect("requires reachable Postgres, Redis, and relay test state");
+            let response = send_with_dntls(
+                state,
+                &host,
+                Method::POST,
+                "/query",
+                &joiner,
+                "[]".to_string(),
+                name,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{admission:?}");
+            assert_eq!(
+                read_json(response)
+                    .await
+                    .get("error")
+                    .and_then(Value::as_str),
+                Some("relay_membership_required"),
+                "{admission:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_reject_blocks_same_pubkey_and_frees_name() {
+        let host = format!("dntls-reject-requeue-{}.example", Uuid::new_v4().simple());
+        let owner = Keys::generate();
+        let joiner = Keys::generate();
+        let other = Keys::generate();
+        let state = dntls_test_state(&host, DntlsAdmission::Approve)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+
+        let (ok, messages) =
+            auth_connection(state.clone(), &host, &joiner, Some("alice.example")).await;
+        assert!(!ok, "{messages:?}");
+
+        let rejected = send(
+            state.clone(),
+            &host,
+            Method::POST,
+            REJECT_PATH,
+            &owner,
+            serde_json::json!({ "pubkey": joiner.public_key().to_hex() }).to_string(),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::OK);
+
+        let (ok, messages) =
+            auth_connection(state.clone(), &host, &joiner, Some("alice.example")).await;
+        assert!(!ok, "{messages:?}");
+        assert!(
+            messages
+                .iter()
+                .any(|msg| msg.contains("restricted: not a relay member")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|msg| !msg.contains(AUTH_APPROVAL_PENDING)),
+            "{messages:?}"
+        );
+        let row = state
+            .db
+            .get_dntls_application(community.id, &joiner.public_key().to_hex())
+            .await
+            .expect("lookup")
+            .expect("rejected row");
+        assert_eq!(row.status, "rejected");
+
+        let (ok, messages) =
+            auth_connection(state.clone(), &host, &other, Some("alice.example")).await;
+        assert!(!ok, "{messages:?}");
+        assert!(
+            messages
+                .iter()
+                .any(|msg| msg.contains(AUTH_APPROVAL_PENDING)),
+            "a different key may still apply for the freed name: {messages:?}"
+        );
+        assert!(state
+            .db
+            .get_dntls_application(community.id, &joiner.public_key().to_hex())
+            .await
+            .expect("replaced rejected")
+            .is_none());
+        let steal = send(
+            state,
+            &host,
+            Method::POST,
+            APPROVE_PATH,
+            &owner,
+            serde_json::json!({ "pubkey": joiner.public_key().to_hex() }).to_string(),
+        )
+        .await;
+        assert_eq!(steal.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_approve_recovers_rejected_row() {
+        let host = format!("dntls-reject-recover-{}.example", Uuid::new_v4().simple());
+        let owner = Keys::generate();
+        let joiner = Keys::generate();
+        let state = dntls_test_state(&host, DntlsAdmission::Approve)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+        state
+            .db
+            .upsert_dntls_pending_application(
+                community.id,
+                &joiner.public_key().to_hex(),
+                "alice.example",
+            )
+            .await
+            .expect("seed pending");
+        let rejected = send(
+            state.clone(),
+            &host,
+            Method::POST,
+            REJECT_PATH,
+            &owner,
+            serde_json::json!({ "pubkey": joiner.public_key().to_hex() }).to_string(),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::OK);
+
+        let recovered = send(
+            state.clone(),
+            &host,
+            Method::POST,
+            APPROVE_PATH,
+            &owner,
+            serde_json::json!({ "pubkey": joiner.public_key().to_hex() }).to_string(),
+        )
+        .await;
+        assert_eq!(recovered.status(), StatusCode::OK);
+        let row = state
+            .db
+            .get_dntls_application(community.id, &joiner.public_key().to_hex())
+            .await
+            .expect("lookup")
+            .expect("approved after misclick");
+        assert_eq!(row.status, "approved");
+        assert!(state
+            .db
+            .is_relay_member(community.id, &joiner.public_key().to_hex())
+            .await
+            .expect("membership"));
     }
 }

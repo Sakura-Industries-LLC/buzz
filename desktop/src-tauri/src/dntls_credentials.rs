@@ -60,9 +60,10 @@ pub(crate) struct DntlsResolver {
 impl DntlsResolver {
     /// Returns the shared client, opening it on first use.
     fn client(&self, app: &AppHandle) -> Result<local::Client, DntlsError> {
-        let mut slot = self.client.lock().map_err(|_| {
-            DntlsError::new("unavailable", "DNTLS resolver client lock poisoned")
-        })?;
+        let mut slot = self
+            .client
+            .lock()
+            .map_err(|_| DntlsError::new("unavailable", "DNTLS resolver client lock poisoned"))?;
         if let Some(existing) = slot.as_ref() {
             return Ok(existing.clone());
         }
@@ -386,10 +387,7 @@ async fn bind_dntls_identity_inner(
 }
 
 /// Shared client for routes that require a registration bearer.
-fn admitted_client(
-    app: &AppHandle,
-    resolver: &DntlsResolver,
-) -> Result<local::Client, DntlsError> {
+fn admitted_client(app: &AppHandle, resolver: &DntlsResolver) -> Result<local::Client, DntlsError> {
     let client = resolver.client(app)?;
     if !client.socket().exists() {
         return Err(DntlsError::new(

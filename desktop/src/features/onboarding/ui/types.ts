@@ -8,7 +8,8 @@ export type OnboardingPage =
   | "profile"
   | "key-import"
   | "avatar"
-  | "membership-denied";
+  | "membership-denied"
+  | "awaiting-approval";
 
 export type OnboardingActions = {
   complete: () => void;

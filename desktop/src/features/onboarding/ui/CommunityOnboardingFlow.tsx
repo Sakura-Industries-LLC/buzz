@@ -8,6 +8,8 @@ import {
 } from "@/features/onboarding/communityOnboarding";
 import { initializeStarterChannels } from "@/features/onboarding/hooks";
 import { useClaimInvite } from "@/features/onboarding/useClaimInvite";
+import { startAwaitingApprovalRetry } from "@/features/onboarding/awaitingApprovalRetry";
+import { membershipGateViewForError } from "@/features/onboarding/membershipGate";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
 import {
   takePendingWelcomeChannelForDirectEntry,
@@ -33,6 +35,7 @@ import { Button } from "@/shared/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { MembershipDenied } from "./MembershipDenied";
+import { AwaitingApproval } from "./AwaitingApproval";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import {
   ONBOARDING_PRIMARY_CTA_CLASS,
@@ -43,16 +46,6 @@ import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
-
-function isRelayMembershipDeniedError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return (
-    error.message.includes("You must be a relay member") ||
-    error.message.includes("relay_membership_required") ||
-    error.message.includes("restricted: not a relay member") ||
-    error.message.includes("invalid: you are not a relay member")
-  );
-}
 
 const STARTER_PERSONA_ANIMATIONS: Record<string, string> = {
   Fizz: "/onboarding/starter-team/fizz.png",
@@ -183,6 +176,10 @@ export function CommunityOnboardingFlow({
     React.useState(0);
   const [deniedPubkey, setDeniedPubkey] = React.useState("");
   const [isMembershipDenied, setIsMembershipDenied] = React.useState(false);
+  const [isAwaitingApproval, setIsAwaitingApproval] = React.useState(false);
+  const awaitingResumeRef = React.useRef<"dntls-skip" | "save-profile">(
+    "dntls-skip",
+  );
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] =
     React.useState(false);
   const [isCurtainFading, setIsCurtainFading] = React.useState(false);
@@ -306,6 +303,91 @@ export function CommunityOnboardingFlow({
   }, [isPending, update]);
 
   const isProfileStage = transaction?.stage === "profile";
+  const routeMembershipError = React.useCallback(async (error: unknown) => {
+    const view = membershipGateViewForError(error);
+    if (view == null) return false;
+    const identity = await getIdentity().catch(() => null);
+    setDeniedPubkey(identity?.pubkey ?? "");
+    setIsMembershipDenied(view === "membership-denied");
+    setIsAwaitingApproval(view === "awaiting-approval");
+    return true;
+  }, []);
+  const publishProfileDraft = React.useCallback(
+    async (targetRelayUrl: string) => {
+      const candidateAvatarUrl = avatarUrl.trim();
+      const presentationState = avatarPresentation?.state;
+      const shouldSaveCandidate =
+        candidateAvatarUrl.length > 0 &&
+        presentationState !== "failed" &&
+        presentationState !== "pending";
+      const deferredAvatar =
+        candidateAvatarUrl && presentationState && presentationState !== "ready"
+          ? registerAvatarWhenReady({
+              avatarUrl: candidateAvatarUrl,
+              relayUrl: targetRelayUrl,
+            })
+          : null;
+      try {
+        const profile = await updateProfile({
+          displayName: displayName.trim(),
+          avatarUrl: shouldSaveCandidate ? candidateAvatarUrl : undefined,
+        });
+        deferredAvatar?.release({
+          expectedPubkey: profile.pubkey,
+          expectedAvatarUrl: profile.avatarUrl,
+        });
+      } catch (error) {
+        deferredAvatar?.cancel();
+        throw error;
+      }
+    },
+    [avatarUrl, avatarPresentation?.state, displayName],
+  );
+  const tryEnterAfterApproval = React.useCallback(
+    async (isCurrent: () => boolean) => {
+      if (!transaction) return "pending";
+      if (awaitingResumeRef.current === "save-profile") {
+        const name = displayName.trim();
+        if (!name) return "pending";
+        try {
+          await publishProfileDraft(transaction.relayUrl);
+        } catch (error) {
+          const view = membershipGateViewForError(error);
+          if (view === "membership-denied") return "denied";
+          return "pending";
+        }
+      } else if (transaction.dntlsName) {
+        const status = await dntlsCredentialsStatus().catch(() => null);
+        const userName = status?.user_name;
+        if (!userName) {
+          if (!isCurrent()) return "pending";
+          setIsAwaitingApproval(false);
+          return "continue";
+        }
+        try {
+          await updateProfile({ displayName: userName });
+        } catch (error) {
+          const view = membershipGateViewForError(error);
+          if (view === "membership-denied") return "denied";
+          return "pending";
+        }
+      } else {
+        if (!isCurrent()) return "pending";
+        setIsAwaitingApproval(false);
+        return "continue";
+      }
+      if (!isCurrent()) return "pending";
+      setIsAwaitingApproval(false);
+      setTransitionDirection("forward");
+      await finalize();
+      return "continue";
+    },
+    [displayName, publishProfileDraft, transaction, finalize],
+  );
+  const approvalAttemptRef = React.useRef(tryEnterAfterApproval);
+  React.useEffect(() => {
+    approvalAttemptRef.current = tryEnterAfterApproval;
+  }, [tryEnterAfterApproval]);
   // Skip the display-name step when the relay already has a profile, or when
   // this is a DNTLS community: the verified DNTLS name the user chose is
   // their name, so it is published as the display name without asking.
@@ -319,7 +401,15 @@ export function CommunityOnboardingFlow({
       update({ stage: "team-intro", error: undefined }, transaction.id);
     };
     void (async () => {
-      const profile = await getProfile().catch(() => null);
+      let profile = null;
+      try {
+        profile = await getProfile();
+      } catch (error) {
+        if (await routeMembershipError(error)) {
+          awaitingResumeRef.current = "dntls-skip";
+          return;
+        }
+      }
       if (profile?.hasProfileEvent) {
         skipToTeam();
         return;
@@ -331,14 +421,8 @@ export function CommunityOnboardingFlow({
       try {
         await updateProfile({ displayName: userName });
       } catch (error) {
-        if (isRelayMembershipDeniedError(error)) {
-          try {
-            const identity = await getIdentity();
-            setDeniedPubkey(identity.pubkey);
-          } catch {
-            setDeniedPubkey("");
-          }
-          setIsMembershipDenied(true);
+        if (await routeMembershipError(error)) {
+          awaitingResumeRef.current = "dntls-skip";
           return;
         }
         // Publishing failed for another reason: fall through to the manual
@@ -348,7 +432,7 @@ export function CommunityOnboardingFlow({
       }
       skipToTeam();
     })();
-  }, [isProfileStage, transaction, update]);
+  }, [isProfileStage, routeMembershipError, transaction, update]);
   const isTeamStage =
     transaction?.stage === "team-intro" ||
     transaction?.stage === "finalizing" ||
@@ -403,6 +487,67 @@ export function CommunityOnboardingFlow({
     return () => resizeObserver.disconnect();
   }, [isAvatarEditorOpen]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a replacement transaction must discard the previous membership gate.
+  React.useEffect(() => {
+    setIsAwaitingApproval(false);
+    setIsMembershipDenied(false);
+  }, [transaction?.id]);
+  React.useEffect(() => {
+    if (transaction?.stage === "claiming") {
+      setIsAwaitingApproval(false);
+      setIsMembershipDenied(false);
+    }
+  }, [transaction?.stage]);
+
+  const approvalTransactionId = transaction?.id;
+  const approvalRelayUrl = transaction?.relayUrl;
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: changing the relay cancels in-flight approval results even when the transaction ID stays the same.
+  React.useEffect(() => {
+    if (!isAwaitingApproval || !approvalTransactionId) return;
+    let cancelled = false;
+
+    const showDenied = () => {
+      if (cancelled) return;
+      setIsAwaitingApproval(false);
+      setIsMembershipDenied(true);
+    };
+    const resume = () => {
+      if (cancelled) return;
+      void approvalAttemptRef
+        .current(() => !cancelled)
+        .then((result) => {
+          if (cancelled) return;
+          if (result === "denied") showDenied();
+        });
+    };
+    const classifyError = (error: unknown) => {
+      if (membershipGateViewForError(error) === "membership-denied") {
+        showDenied();
+      }
+    };
+
+    void relayClient.preconnect().catch(classifyError);
+    const unsub = relayClient.subscribeToConnectionState((state) => {
+      if (cancelled) return;
+      if (state === "connected") resume();
+      if (state === "disconnected") {
+        void relayClient.preconnect().catch(classifyError);
+      }
+    });
+    const stop = startAwaitingApprovalRetry({
+      attempt: () => approvalAttemptRef.current(() => !cancelled),
+      onContinue: () => {},
+      onDenied: showDenied,
+    });
+
+    return () => {
+      cancelled = true;
+      unsub();
+      stop();
+    };
+  }, [isAwaitingApproval, approvalTransactionId, approvalRelayUrl]);
+
   if (!transaction) return null;
 
   if (isMembershipDenied) {
@@ -437,6 +582,34 @@ export function CommunityOnboardingFlow({
                 error: undefined,
               });
               setIsMembershipDenied(false);
+              setIsAwaitingApproval(false);
+            }}
+          />
+        ) : null}
+      </>
+    );
+  }
+
+  if (isAwaitingApproval) {
+    return (
+      <>
+        <AwaitingApproval
+          activeRelayUrl={transaction.relayUrl}
+          communityHint={transaction.dntlsName ?? transaction.communityName}
+          onChangeCommunity={() => setIsCommunityChangeOpen(true)}
+        />
+        {isCommunityChangeOpen ? (
+          <CommunityChangeOverlay
+            onClose={() => setIsCommunityChangeOpen(false)}
+            onUpdated={(communityName, updatedRelayUrl) => {
+              update({
+                communityName,
+                relayUrl: updatedRelayUrl,
+                stage: "connecting",
+                error: undefined,
+              });
+              setIsAwaitingApproval(false);
+              setIsMembershipDenied(false);
             }}
           />
         ) : null}
@@ -448,45 +621,12 @@ export function CommunityOnboardingFlow({
     if (!displayName.trim()) return;
     setIsPending(true);
     try {
-      const candidateAvatarUrl = avatarUrl.trim();
-      const presentationState = avatarPresentation?.state;
-      const shouldSaveCandidate =
-        candidateAvatarUrl.length > 0 &&
-        presentationState !== "failed" &&
-        presentationState !== "pending";
-
-      const deferredAvatar =
-        candidateAvatarUrl && presentationState && presentationState !== "ready"
-          ? registerAvatarWhenReady({
-              avatarUrl: candidateAvatarUrl,
-              relayUrl: transaction.relayUrl,
-            })
-          : null;
-
-      try {
-        const profile = await updateProfile({
-          displayName: displayName.trim(),
-          avatarUrl: shouldSaveCandidate ? candidateAvatarUrl : undefined,
-        });
-        deferredAvatar?.release({
-          expectedPubkey: profile.pubkey,
-          expectedAvatarUrl: profile.avatarUrl,
-        });
-      } catch (error) {
-        deferredAvatar?.cancel();
-        throw error;
-      }
+      await publishProfileDraft(transaction.relayUrl);
       setTransitionDirection("forward");
       update({ stage: "team-intro", error: undefined });
     } catch (error) {
-      if (isRelayMembershipDeniedError(error)) {
-        try {
-          const identity = await getIdentity();
-          setDeniedPubkey(identity.pubkey);
-        } catch {
-          setDeniedPubkey("");
-        }
-        setIsMembershipDenied(true);
+      if (await routeMembershipError(error)) {
+        awaitingResumeRef.current = "save-profile";
         return;
       }
       update({ error: error instanceof Error ? error.message : String(error) });

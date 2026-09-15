@@ -897,6 +897,7 @@ async fn submit_event_authed(
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        super::dntls::verified_name_from_headers(headers).as_deref(),
     )
     .await
     {
@@ -1058,6 +1059,7 @@ async fn query_events_authed(
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        super::dntls::verified_name_from_headers(headers).as_deref(),
     )
     .await?;
 
@@ -1585,6 +1587,7 @@ async fn count_events_authed(
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        super::dntls::verified_name_from_headers(headers).as_deref(),
     )
     .await?;
 

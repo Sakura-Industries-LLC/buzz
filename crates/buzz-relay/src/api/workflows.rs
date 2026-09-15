@@ -76,6 +76,7 @@ async fn authorize_workflow_read(
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        super::dntls::verified_name_from_headers(headers).as_deref(),
     )
     .await?;
 

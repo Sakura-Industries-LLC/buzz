@@ -158,8 +158,12 @@ export function startCommunityOnboarding(
   const relayUrl = canonicalRelayUrl(input.relayUrl);
   const existing = loadCommunityOnboardingTransaction(storage);
   if (existing?.relayUrl === relayUrl) {
-    const updated = {
+    const updated: CommunityOnboardingTransaction = {
       ...existing,
+      stage:
+        input.source === "membership-recovery" && input.inviteCode?.trim()
+          ? "claiming"
+          : existing.stage,
       firstCommunityPage:
         input.firstCommunityPage ?? existing.firstCommunityPage,
       inviteCode: input.inviteCode?.trim() || existing.inviteCode,

@@ -8,6 +8,12 @@ import {
 import { relayClient } from "@/shared/api/relayClient";
 import { getMyRelayMembershipLookup } from "@/shared/api/relayMembers";
 import { isRelayUnreachableError } from "@/shared/lib/relayError";
+import { startAwaitingApprovalRetry } from "@/features/onboarding/awaitingApprovalRetry";
+import {
+  isDntlsApprovalPendingError,
+  isRelayMembershipDeniedError,
+  membershipGateViewForError,
+} from "@/features/onboarding/membershipGate";
 import {
   getIdentity,
   importIdentity,
@@ -20,6 +26,7 @@ import { AvatarStep } from "./AvatarStep";
 import { OnboardingChrome } from "./OnboardingChrome";
 import { OnboardingFooterProvider } from "./OnboardingFooter";
 import { MembershipDenied } from "./MembershipDenied";
+import { AwaitingApproval } from "./AwaitingApproval";
 import {
   NostrKeyImportForm,
   type NostrKeyImportStage,
@@ -39,20 +46,12 @@ import type {
   ProfileStepState,
 } from "./types";
 
-function isRelayMembershipDeniedError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-
-  return (
-    error.message.includes("You must be a relay member") ||
-    error.message.includes("relay_membership_required") ||
-    error.message.includes("restricted: not a relay member") ||
-    error.message.includes("invalid: you are not a relay member")
-  );
-}
-
-type MembershipCheckResult = "denied" | "ok" | "unreachable" | "error";
+type MembershipCheckResult =
+  | "denied"
+  | "pending"
+  | "ok"
+  | "unreachable"
+  | "error";
 
 async function checkMembershipStatus(): Promise<MembershipCheckResult> {
   try {
@@ -60,6 +59,7 @@ async function checkMembershipStatus(): Promise<MembershipCheckResult> {
     if (snapshotFound && membership === null) return "denied";
     return "ok";
   } catch (error) {
+    if (isDntlsApprovalPendingError(error)) return "pending";
     if (isRelayMembershipDeniedError(error)) return "denied";
     // Native Tauri commands report connectivity failures with the stable
     // "relay unreachable:" prefix (see desktop/src-tauri/src/relay.rs), which
@@ -246,8 +246,7 @@ export function OnboardingFlow({
         // this passes instantly. On gated relays it prevents a 403 during save.
         const membershipStatus = await checkMembershipStatus();
         setMembershipError(null);
-
-        if (membershipStatus === "denied") {
+        if (membershipStatus === "denied" || membershipStatus === "pending") {
           try {
             const identity = await getIdentity();
             setDeniedPubkey(identity.pubkey);
@@ -255,10 +254,17 @@ export function OnboardingFlow({
             setDeniedPubkey("");
           }
           setDeniedFromPage((prev) =>
-            currentPage === "membership-denied" ? prev : currentPage,
+            currentPage === "membership-denied" ||
+            currentPage === "awaiting-approval"
+              ? prev
+              : currentPage,
           );
           setMembershipRetryPage(nextPage);
-          setCurrentPage("membership-denied");
+          setCurrentPage(
+            membershipStatus === "pending"
+              ? "awaiting-approval"
+              : "membership-denied",
+          );
           return;
         }
 
@@ -284,7 +290,8 @@ export function OnboardingFlow({
           try {
             await profileUpdateMutation.mutateAsync(updatePayload);
           } catch (error) {
-            if (isRelayMembershipDeniedError(error)) {
+            const view = membershipGateViewForError(error);
+            if (view) {
               try {
                 const identity = await getIdentity();
                 setDeniedPubkey(identity.pubkey);
@@ -292,10 +299,13 @@ export function OnboardingFlow({
                 setDeniedPubkey("");
               }
               setDeniedFromPage((prev) =>
-                currentPage === "membership-denied" ? prev : currentPage,
+                currentPage === "membership-denied" ||
+                currentPage === "awaiting-approval"
+                  ? prev
+                  : currentPage,
               );
               setMembershipRetryPage(nextPage);
-              setCurrentPage("membership-denied");
+              setCurrentPage(view);
               return;
             }
 
@@ -323,6 +333,52 @@ export function OnboardingFlow({
       showAvatarPage,
     ],
   );
+  const resumeApprovalRef = React.useRef(saveProfileAndContinue);
+  React.useEffect(() => {
+    resumeApprovalRef.current = saveProfileAndContinue;
+  }, [saveProfileAndContinue]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: each community owns its timer and subscriptions; switching must cancel the previous ones.
+  React.useEffect(() => {
+    if (currentPage !== "awaiting-approval") return;
+    let cancelled = false;
+
+    const showDenied = () => {
+      if (!cancelled) setCurrentPage("membership-denied");
+    };
+    const resume = () => {
+      if (!cancelled) void resumeApprovalRef.current("complete");
+    };
+    const classifyError = (error: unknown) => {
+      if (membershipGateViewForError(error) === "membership-denied") {
+        showDenied();
+      }
+    };
+
+    void relayClient.preconnect().catch(classifyError);
+    const unsub = relayClient.subscribeToConnectionState((state) => {
+      if (cancelled) return;
+      if (state === "connected") resume();
+      if (state === "disconnected") {
+        void relayClient.preconnect().catch(classifyError);
+      }
+    });
+    const stop = startAwaitingApprovalRetry({
+      attempt: async () => {
+        const status = await checkMembershipStatus();
+        if (status === "ok") return "continue";
+        if (status === "denied") return "denied";
+        return "pending";
+      },
+      onContinue: resume,
+      onDenied: showDenied,
+    });
+
+    return () => {
+      cancelled = true;
+      unsub();
+      stop();
+    };
+  }, [activeCommunity?.id, activeCommunity?.relayUrl, currentPage]);
 
   const updateDisplayNameDraft = React.useCallback(
     (value: string) => {
@@ -487,6 +543,23 @@ export function OnboardingFlow({
             void saveProfileAndContinue(membershipRetryPage);
           }}
           pubkey={deniedPubkey}
+        />
+        {isCommunityChangeOpen ? (
+          <CommunityChangeOverlay
+            onClose={() => setIsCommunityChangeOpen(false)}
+          />
+        ) : null}
+      </>
+    );
+  }
+
+  if (currentPage === "awaiting-approval") {
+    return (
+      <>
+        <AwaitingApproval
+          activeRelayUrl={activeCommunity?.relayUrl ?? ""}
+          communityHint={activeCommunity?.dntlsName ?? activeCommunity?.name}
+          onChangeCommunity={() => setIsCommunityChangeOpen(true)}
         />
         {isCommunityChangeOpen ? (
           <CommunityChangeOverlay

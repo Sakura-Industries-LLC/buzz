@@ -152,7 +152,9 @@ pub(crate) async fn unread_catch_up(
     // would then be reading a cancelled socket. The `join_next` drain ends
     // before this binding does, so that holds today — keep it that way, and in
     // particular do not move the lease into a task or narrow its scope.
-    let session = relay_client.session(relay_url.clone(), auth_url, keys).await;
+    let session = relay_client
+        .session(relay_url.clone(), auth_url, keys)
+        .await;
 
     let concurrency = std::sync::Arc::new(Semaphore::new(8));
     let mut pending = JoinSet::new();

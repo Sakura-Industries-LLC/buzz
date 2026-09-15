@@ -124,22 +124,43 @@ pub mod relay_members {
     ///
     /// Returns `Ok(None)` when the caller is a direct member (closed relay) or when
     /// no NIP-OA tag is present/applicable (open relay without auth tag).
+    ///
+    /// `dntls_name` is consulted only after a denial, and only when admission is
+    /// `approve`: a matching pending application becomes `dntls_approval_pending`.
     pub async fn enforce_relay_membership(
         state: &AppState,
         community: CommunityId,
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
+        dntls_name: Option<&str>,
     ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
         match check_relay_membership(state, community, pubkey_bytes, auth_tag_header).await {
             Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => Ok(None),
             Ok(MembershipDecision::ViaOwner(owner)) => Ok(Some(owner)),
-            Ok(MembershipDecision::Denied) => Err((
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({
-                    "error": "relay_membership_required",
-                    "message": "You must be a relay member to access this relay"
-                })),
-            )),
+            Ok(MembershipDecision::Denied) => {
+                let pubkey_hex = hex::encode(pubkey_bytes);
+                if super::dntls::matching_pending_application(
+                    state,
+                    community,
+                    &pubkey_hex,
+                    dntls_name,
+                )
+                .await
+                {
+                    Err(super::api_error(
+                        StatusCode::FORBIDDEN,
+                        super::dntls::HTTP_APPROVAL_PENDING,
+                    ))
+                } else {
+                    Err((
+                        StatusCode::FORBIDDEN,
+                        Json(serde_json::json!({
+                            "error": "relay_membership_required",
+                            "message": "You must be a relay member to access this relay"
+                        })),
+                    ))
+                }
+            }
             Err(e) => {
                 tracing::error!("relay membership check errored: {e}");
                 Err(super::internal_error(&e))

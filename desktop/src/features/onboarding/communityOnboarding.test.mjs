@@ -93,6 +93,36 @@ test("same-relay ingress resumes rather than replacing progress", () => {
   assert.equal(resumed.inviteCode, "new-code");
 });
 
+test("an invite resumes a waiting application through the claim stage", () => {
+  const storage = createMemoryStorage();
+  const transaction = startCommunityOnboarding(
+    {
+      source: "add-community",
+      relayUrl: "ws://127.0.0.1:4100",
+      dntlsName: "community.example.dntls",
+    },
+    storage,
+  );
+  updateCommunityOnboardingTransaction(
+    transaction,
+    { stage: "profile" },
+    storage,
+  );
+  const resumed = startCommunityOnboarding(
+    {
+      source: "membership-recovery",
+      relayUrl: transaction.relayUrl,
+      inviteCode: "accepted-invite",
+      policyReceipt: "accepted-policy",
+    },
+    storage,
+  );
+  assert.equal(resumed.stage, "claiming");
+  assert.equal(resumed.inviteCode, "accepted-invite");
+  assert.equal(resumed.policyReceipt, "accepted-policy");
+  assert.equal(resumed.dntlsName, "community.example.dntls");
+});
+
 test("stale asynchronous updates cannot mutate a replacement transaction", () => {
   const storage = createMemoryStorage();
   const original = startCommunityOnboarding(
