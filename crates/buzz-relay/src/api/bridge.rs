@@ -27,7 +27,10 @@ pub(crate) async fn enforce_http_admission(
     pubkey: &nostr::PublicKey,
     headers: &HeaderMap,
 ) -> Result<(), (StatusCode, Json<Value>)> {
-    super::dntls::apply_http_admission(state, tenant, headers, &pubkey.to_hex()).await?;
+    let http_auth_tag = crate::handlers::auth::http_auth_tag_json(headers);
+    if !crate::handlers::auth::is_verified_delegated_auth(pubkey, http_auth_tag.as_deref()) {
+        super::dntls::apply_http_admission(state, tenant, headers, &pubkey.to_hex()).await?;
+    }
 
     let limit = state.auth.config().rate_limits.human_api_calls_per_min;
     match crate::admission::check_principal(

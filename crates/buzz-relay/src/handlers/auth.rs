@@ -8,6 +8,11 @@
 //!
 //! For WebSocket auth, the NIP-OA `auth` tag is extracted from the signed AUTH
 //! event itself (the tag is integrity-protected by the event signature).
+//!
+//! Verified NIP-OA delegated AUTH never binds or rebinds a DNTLS name and never
+//! grants admin or auto-membership through the DNTLS path. Agents are admitted
+//! through the owner's delegation. Absent or invalid `auth` tags fail closed:
+//! DNTLS admission still runs and ordinary membership checks are unchanged.
 
 use std::sync::Arc;
 
@@ -33,6 +38,41 @@ pub fn extract_auth_tag_json(event: &nostr::Event) -> Option<String> {
         return None; // NIP-OA spec: treat >1 auth tag as no valid auth tag
     }
     serde_json::to_string(first.as_slice()).ok()
+}
+
+/// HTTP NIP-OA auth tag from `x-auth-tag`, or from the signed NIP-98 event.
+///
+/// Prefers `x-auth-tag` so HTTP membership and DNTLS skip see the same header
+/// `enforce_relay_membership` already uses. When that header is absent, a
+/// single `auth` tag on the `Authorization: Nostr` event is used (git-style).
+/// Duplicate event tags fail closed (`None` from [`extract_auth_tag_json`]).
+pub(crate) fn http_auth_tag_json(headers: &axum::http::HeaderMap) -> Option<String> {
+    if let Some(header) = headers.get("x-auth-tag").and_then(|v| v.to_str().ok()) {
+        if !header.is_empty() {
+            return Some(header.to_string());
+        }
+    }
+    let auth_str = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Nostr "))?;
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(auth_str)
+        .ok()?;
+    let event: nostr::Event = serde_json::from_slice(&bytes).ok()?;
+    extract_auth_tag_json(&event)
+}
+
+/// True when `auth_tag_json` is a verified NIP-OA attestation for `pubkey`.
+///
+/// Used to skip DNTLS name binding for delegated callers. Absent or invalid
+/// tags fail closed (`false`) so DNTLS admission and membership still run.
+pub(crate) fn is_verified_delegated_auth(
+    pubkey: &nostr::PublicKey,
+    auth_tag_json: Option<&str>,
+) -> bool {
+    crate::api::relay_members::extract_nip_oa_owner(pubkey.as_bytes(), auth_tag_json).is_some()
 }
 
 /// Handle a NIP-42 AUTH message: verify the challenge response and transition
@@ -214,8 +254,12 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             }
 
             // Gateway-verified DNTLS name (X-DNTLS-Name) is bound at AUTH so
-            // auto-admit can run before the membership gate.
-            if !crate::api::dntls::apply_auth_admission(&state, &conn, &pubkey.to_hex()).await {
+            // auto-admit can run before the membership gate. Verified NIP-OA
+            // agents never bind or rebind that name; they stay on owner
+            // delegation. Unverified tags fail closed and still admit.
+            if !is_verified_delegated_auth(&pubkey, auth_tag_json.as_deref())
+                && !crate::api::dntls::apply_auth_admission(&state, &conn, &pubkey.to_hex()).await
+            {
                 metrics::counter!("buzz_auth_failures_total", "reason" => "dntls_admission")
                     .increment(1);
                 *conn.auth_state.write().await = AuthState::Failed;
@@ -318,8 +362,23 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
 
 #[cfg(test)]
 mod tests {
-    use super::extract_auth_tag_json;
-    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use super::{
+        extract_auth_tag_json, handle_auth, http_auth_tag_json, is_verified_delegated_auth,
+    };
+    use std::sync::atomic::AtomicU8;
+    use std::sync::Arc;
+
+    use axum::http::{HeaderMap, HeaderValue};
+    use axum::extract::ws::Message as WsMessage;
+    use nostr::{EventBuilder, Keys, Kind, RelayUrl, Tag};
+    use tokio::sync::{mpsc, Mutex, RwLock};
+    use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
+
+    use crate::config::DntlsAdmission;
+    use crate::connection::AuthState;
+    use crate::state::AppState;
+    use buzz_core::tenant::TenantContext;
 
     /// Build a signed NIP-98 (kind 27235) event carrying the given tags. The
     /// `auth` tag lives inside the signed event exactly as the git and
@@ -368,5 +427,347 @@ mod tests {
             Tag::parse(["auth", b.as_str(), "", sig.as_str()]).unwrap(),
         ]);
         assert_eq!(extract_auth_tag_json(&event), None);
+    }
+
+    #[test]
+    fn verified_delegated_auth_fails_closed_without_valid_tag() {
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+            .expect("auth tag");
+        assert!(is_verified_delegated_auth(
+            &agent.public_key(),
+            Some(&tag)
+        ));
+        assert!(!is_verified_delegated_auth(&agent.public_key(), None));
+        assert!(!is_verified_delegated_auth(
+            &agent.public_key(),
+            Some("not-json")
+        ));
+        assert!(
+            !is_verified_delegated_auth(&owner.public_key(), Some(&tag)),
+            "tag for a different pubkey must not skip DNTLS"
+        );
+    }
+
+    #[test]
+    fn http_auth_tag_prefers_header_then_nip98_event() {
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+            .expect("auth tag");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-auth-tag", HeaderValue::from_str(&tag).expect("header"));
+        assert_eq!(http_auth_tag_json(&headers).as_deref(), Some(tag.as_str()));
+
+        let mut invalid = HeaderMap::new();
+        invalid.insert("x-auth-tag", HeaderValue::from_static("not-json"));
+        assert_eq!(
+            http_auth_tag_json(&invalid).as_deref(),
+            Some("not-json"),
+            "present invalid header must not fall through to a forged event tag"
+        );
+
+        let parsed = buzz_sdk::nip_oa::parse_auth_tag(&tag).expect("parse");
+        let event = signed_event_with_tags(vec![parsed]);
+        let encoded = {
+            use base64::Engine;
+            let json = serde_json::to_string(&event).expect("json");
+            base64::engine::general_purpose::STANDARD.encode(json.as_bytes())
+        };
+        let mut event_headers = HeaderMap::new();
+        event_headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Nostr {encoded}")).expect("authz"),
+        );
+        assert_eq!(
+            http_auth_tag_json(&event_headers).as_deref(),
+            Some(tag.as_str())
+        );
+
+        assert_eq!(http_auth_tag_json(&HeaderMap::new()), None);
+    }
+
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
+    const TEST_REDIS_URL: &str = "redis://127.0.0.1:6379";
+
+    async fn delegated_test_state(host: &str) -> Option<Arc<AppState>> {
+        let mut config = crate::config::Config::from_env().ok()?;
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_string());
+        config.database_url = database_url.clone();
+        config.redis_url = TEST_REDIS_URL.to_string();
+        config.relay_url = format!("wss://{host}");
+        config.require_relay_membership = true;
+        config.allow_nip_oa_auth = true;
+        config.dntls_admission = DntlsAdmission::Approve;
+        config.dntls_admins = vec!["josh.dntls".to_string()];
+
+        let pool = sqlx::PgPool::connect(&database_url).await.ok()?;
+        let db = buzz_db::Db::from_pool(pool.clone());
+        db.ensure_configured_community(host).await.ok()?;
+
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .ok()?;
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .ok()?,
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).ok()?;
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            Keys::generate(),
+            media_storage,
+        );
+        Some(Arc::new(state))
+    }
+
+    fn ws_text(msg: &WsMessage) -> String {
+        match msg {
+            WsMessage::Text(text) => text.to_string(),
+            other => panic!("expected text frame, got {other:?}"),
+        }
+    }
+
+    async fn auth_connection(
+        state: Arc<AppState>,
+        host: &str,
+        keys: &Keys,
+        dntls_name: Option<&str>,
+        auth_tag: Option<Tag>,
+    ) -> (bool, Vec<String>) {
+        let community = state
+            .db
+            .lookup_community_by_host(host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        let tenant = TenantContext::resolved(community.id, host);
+        let challenge = buzz_auth::generate_challenge();
+        let (send_tx, mut send_rx) = mpsc::channel(16);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let subscriptions = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let conn_id = Uuid::new_v4();
+        let conn = Arc::new(crate::connection::ConnectionState {
+            conn_id,
+            tenant,
+            remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
+            auth_state: RwLock::new(AuthState::Pending {
+                challenge: challenge.clone(),
+            }),
+            subscriptions: Arc::clone(&subscriptions),
+            send_tx: send_tx.clone(),
+            ctrl_tx: ctrl_tx.clone(),
+            cancel: cancel.clone(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+            dntls_name: dntls_name.map(str::to_string),
+        });
+        state.conn_manager.register(
+            conn_id,
+            send_tx,
+            ctrl_tx,
+            None,
+            cancel,
+            conn.tenant.community(),
+            Arc::clone(&conn.backpressure_count),
+            subscriptions,
+            3,
+        );
+
+        let relay_url =
+            crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &conn.tenant);
+        let mut builder =
+            EventBuilder::auth(&challenge, RelayUrl::parse(&relay_url).expect("relay url"));
+        if let Some(tag) = auth_tag {
+            builder = builder.tags([tag]);
+        }
+        let event = builder.sign_with_keys(keys).expect("sign AUTH");
+        handle_auth(event, Arc::clone(&conn), state).await;
+
+        let mut messages = Vec::new();
+        while let Ok(msg) = send_rx.try_recv() {
+            messages.push(ws_text(&msg));
+        }
+        let authenticated = matches!(*conn.auth_state.read().await, AuthState::Authenticated(_));
+        (authenticated, messages)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn delegated_auth_does_not_rebind_listed_admin_name() {
+        let host = format!("dntls-delegated-auth-{}.example", Uuid::new_v4().simple());
+        let state = delegated_test_state(&host)
+            .await
+            .expect("requires reachable Postgres, Redis, and relay test state");
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+
+        let (ok, messages) =
+            auth_connection(state.clone(), &host, &owner, Some("josh.dntls"), None).await;
+        assert!(ok, "owner AUTH: {messages:?}");
+
+        let tag_json = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+            .expect("auth tag");
+        let auth_tag = buzz_sdk::nip_oa::parse_auth_tag(&tag_json).expect("parse");
+        let (ok, messages) = auth_connection(
+            state.clone(),
+            &host,
+            &agent,
+            Some("josh.dntls"),
+            Some(auth_tag),
+        )
+        .await;
+        assert!(ok, "delegated agent AUTH: {messages:?}");
+
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community");
+        let owner_hex = owner.public_key().to_hex();
+        let agent_hex = agent.public_key().to_hex();
+
+        assert_eq!(
+            state
+                .db
+                .get_relay_member(community.id, &owner_hex)
+                .await
+                .expect("owner member")
+                .expect("owner present")
+                .role,
+            "admin"
+        );
+        assert!(
+            state
+                .db
+                .get_relay_member(community.id, &agent_hex)
+                .await
+                .expect("agent member")
+                .is_none(),
+            "delegated agent must not gain DNTLS auto-membership"
+        );
+
+        let bound = state
+            .db
+            .get_dntls_application(community.id, &owner_hex)
+            .await
+            .expect("owner binding")
+            .expect("name bound to owner");
+        assert_eq!(bound.fqdn, "josh.dntls");
+        assert_eq!(bound.status, "approved");
+        assert!(
+            state
+                .db
+                .get_dntls_application(community.id, &agent_hex)
+                .await
+                .expect("agent binding")
+                .is_none(),
+            "delegated agent must not bind or rebind the DNTLS name"
+        );
+
+        let snapshots = state
+            .db
+            .query_events(&buzz_db::EventQuery {
+                kinds: Some(vec![buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32]),
+                pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                global_only: true,
+                limit: Some(10),
+                ..buzz_db::EventQuery::for_community(community.id)
+            })
+            .await
+            .expect("snapshots");
+        assert_eq!(
+            snapshots.len(),
+            1,
+            "delegated AUTH must not publish extra membership snapshots: {snapshots:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn delegated_http_does_not_apply_dntls_admission() {
+        let host = format!("dntls-delegated-http-{}.example", Uuid::new_v4().simple());
+        let state = delegated_test_state(&host)
+            .await
+            .expect("requires reachable Postgres, Redis, and relay test state");
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+
+        let (ok, messages) =
+            auth_connection(state.clone(), &host, &owner, Some("josh.dntls"), None).await;
+        assert!(ok, "owner AUTH: {messages:?}");
+
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community");
+        let tenant = TenantContext::resolved(community.id, host.as_str());
+        let tag_json = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+            .expect("auth tag");
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dntls-name", HeaderValue::from_static("josh.dntls"));
+        headers.insert(
+            "x-auth-tag",
+            HeaderValue::from_str(&tag_json).expect("auth tag header"),
+        );
+
+        let _ = crate::api::bridge::enforce_http_admission(
+            &state,
+            &tenant,
+            &agent.public_key(),
+            &headers,
+        )
+        .await;
+
+        let owner_hex = owner.public_key().to_hex();
+        let agent_hex = agent.public_key().to_hex();
+        let bound = state
+            .db
+            .get_dntls_application(community.id, &owner_hex)
+            .await
+            .expect("owner binding")
+            .expect("name still bound to owner");
+        assert_eq!(bound.fqdn, "josh.dntls");
+        assert!(
+            state
+                .db
+                .get_dntls_application(community.id, &agent_hex)
+                .await
+                .expect("agent binding")
+                .is_none(),
+            "NIP-98 delegated caller must not bind the DNTLS name"
+        );
+        assert!(
+            state
+                .db
+                .get_relay_member(community.id, &agent_hex)
+                .await
+                .expect("agent member")
+                .is_none(),
+            "NIP-98 delegated caller must not gain DNTLS auto-membership"
+        );
     }
 }

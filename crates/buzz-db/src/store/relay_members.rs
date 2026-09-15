@@ -849,9 +849,9 @@ impl Db {
     /// Returns whether the relay-authored NIP-43 snapshot is absent or differs
     /// from the canonical membership rows for `community_id`.
     ///
-    /// Snapshot and canonical rows are compared directly rather than by
-    /// timestamp: relay membership events use whole-second Nostr timestamps,
-    /// and multiple mutations within one second must still be repaired.
+    /// The latest snapshot is the highest `received_at`, not NIP-01 `created_at`
+    /// or event id: kind:13534 uses whole-second timestamps, and same-second
+    /// publishes must not flap `admin`/`member` by id order.
     #[datastore_span(
         name = "nip43_membership_snapshot_needs_reconciliation",
         system = "postgresql"
@@ -861,17 +861,8 @@ impl Db {
         community_id: CommunityId,
         relay_pubkey: &nostr::PublicKey,
     ) -> Result<bool> {
-        let snapshot = self
-            .query_events(&crate::event::EventQuery {
-                kinds: Some(vec![buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32]),
-                pubkey: Some(relay_pubkey.to_bytes().to_vec()),
-                global_only: true,
-                limit: Some(1),
-                ..crate::event::EventQuery::for_community(community_id)
-            })
-            .await?
-            .into_iter()
-            .next();
+        let snapshot =
+            latest_nip43_membership_snapshot(&self.pool, community_id, relay_pubkey).await?;
         let members = self.list_relay_members(community_id).await?;
 
         let Some(snapshot) = snapshot else {
@@ -900,11 +891,11 @@ impl Db {
     /// Atomically publish a NIP-43 membership snapshot under a single
     /// transaction-scoped advisory lock.
     ///
-    /// This method acquires the per-community snapshot lock, reads the
-    /// current membership, builds the event, and replaces the prior snapshot
-    /// — all inside one transaction on one database connection. This
-    /// prevents the stale-snapshot race where a concurrent publication reads
-    /// older state and overwrites a newer snapshot by arrival order.
+    /// Acquires the per-community snapshot lock, reads membership, builds the
+    /// event, and hard-deletes prior kind:13534 rows for this relay in the
+    /// same transaction so exactly one snapshot row remains. The lock
+    /// serializes the read-build-write cycle so a stale publish cannot
+    /// overwrite a newer snapshot by arrival order.
     #[datastore_span(name = "publish_nip43_membership_locked", system = "postgresql")]
     pub async fn publish_nip43_membership_locked(
         &self,
@@ -983,12 +974,13 @@ impl Db {
         let received_at = chrono::Utc::now();
         let d_tag = crate::event::extract_d_tag(&event);
 
-        // Soft-delete prior snapshots — unconditional, the relay is authoritative.
+        // Hard-delete prior snapshots — the relay is authoritative, and
+        // `REQ {kinds:[13534], limit:1}` plus operators looking at `events`
+        // must see exactly one row per community.
         sqlx::query(
-            "UPDATE events SET deleted_at = NOW() \
+            "DELETE FROM events \
              WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
-             AND channel_id IS NULL \
-             AND deleted_at IS NULL",
+             AND channel_id IS NULL",
         )
         .bind(community_id.as_uuid())
         .bind(kind_i32)
@@ -1036,6 +1028,36 @@ impl Db {
             was_inserted,
             member_count,
         ))
+    }
+}
+
+/// Latest live kind:13534 snapshot for `community_id`, ordered by arrival.
+///
+/// `received_at` is the authority. Same-second `created_at` values must not
+/// be broken by event id (the NIP-01 REQ default), or a `member` snapshot
+/// can beat a later `admin` snapshot.
+async fn latest_nip43_membership_snapshot(
+    pool: &PgPool,
+    community_id: CommunityId,
+    relay_pubkey: &nostr::PublicKey,
+) -> Result<Option<StoredEvent>> {
+    let kind_i32 = buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32;
+    let row = sqlx::query(
+        "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
+         FROM events \
+         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+         AND channel_id IS NULL AND deleted_at IS NULL \
+         ORDER BY received_at DESC \
+         LIMIT 1",
+    )
+    .bind(community_id.as_uuid())
+    .bind(kind_i32)
+    .bind(relay_pubkey.to_bytes().as_slice())
+    .fetch_optional(pool)
+    .await?;
+    match row {
+        Some(row) => crate::event::row_to_stored_event(row),
+        None => Ok(None),
     }
 }
 
@@ -1459,6 +1481,137 @@ mod tests {
                 .expect("exists")
                 .role,
             "owner"
+        );
+    }
+
+    fn membership_snapshot_event(
+        keys: &nostr::Keys,
+        created_at: nostr::Timestamp,
+        members: &[(&str, &str)],
+    ) -> nostr::Event {
+        use nostr::{EventBuilder, Kind, Tag};
+        let mut tags = Vec::with_capacity(members.len() + 1);
+        tags.push(Tag::parse(["-"]).expect("protected tag"));
+        for (pubkey, role) in members {
+            tags.push(Tag::parse(["member", pubkey, role]).expect("member tag"));
+        }
+        EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as u16),
+            "",
+        )
+        .custom_created_at(created_at)
+        .tags(tags)
+        .sign_with_keys(keys)
+        .expect("sign kind:13534")
+    }
+
+    async fn insert_membership_snapshot(
+        pool: &PgPool,
+        community: CommunityId,
+        event: &nostr::Event,
+        received_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        let created_at = chrono::DateTime::from_timestamp(event.created_at.as_secs() as i64, 0)
+            .expect("created_at");
+        let kind = buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32;
+        sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL)",
+        )
+        .bind(community.as_uuid())
+        .bind(event.id.as_bytes().as_slice())
+        .bind(event.pubkey.to_bytes().as_slice())
+        .bind(created_at)
+        .bind(kind)
+        .bind(serde_json::to_value(&event.tags).expect("tags json"))
+        .bind(&event.content)
+        .bind(event.sig.serialize().as_slice())
+        .bind(received_at)
+        .execute(pool)
+        .await
+        .expect("insert snapshot");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn publish_nip43_membership_leaves_exactly_one_snapshot() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let owner = test_pubkey();
+        bootstrap_owner(&pool, community, &owner)
+            .await
+            .expect("bootstrap owner");
+        add_relay_member(&pool, community, &test_pubkey(), "member", None)
+            .await
+            .expect("add member");
+
+        let db = Db::from_pool(pool.clone());
+        let relay = nostr::Keys::generate();
+        db.publish_nip43_membership_locked(community, &relay)
+            .await
+            .expect("first snapshot");
+        db.publish_nip43_membership_locked(community, &relay)
+            .await
+            .expect("second snapshot");
+
+        let kind = buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32;
+        let pubkey = relay.public_key().to_bytes();
+        let total: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3",
+        )
+        .bind(community.as_uuid())
+        .bind(kind)
+        .bind(pubkey.as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("count snapshots");
+        assert_eq!(
+            total, 1,
+            "publish must leave exactly one kind:13534 row, including prior deletes"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip43_snapshot_reconciliation_uses_received_at_not_id() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let owner = test_pubkey();
+        let extra = test_pubkey();
+        bootstrap_owner(&pool, community, &owner)
+            .await
+            .expect("bootstrap owner");
+        add_relay_member(&pool, community, &extra, "member", None)
+            .await
+            .expect("add member");
+
+        let relay = nostr::Keys::generate();
+        let ts = nostr::Timestamp::now();
+        let fresh = membership_snapshot_event(
+            &relay,
+            ts,
+            &[(&owner, "owner"), (&extra, "member")],
+        );
+        let mut stale = membership_snapshot_event(&relay, ts, &[(&owner, "owner")]);
+        while stale.id.as_bytes() >= fresh.id.as_bytes() {
+            stale = membership_snapshot_event(&relay, ts, &[(&owner, "owner")]);
+        }
+
+        let earlier = chrono::Utc::now() - chrono::Duration::seconds(2);
+        let later = chrono::Utc::now() - chrono::Duration::seconds(1);
+        insert_membership_snapshot(&pool, community, &stale, earlier).await;
+        insert_membership_snapshot(&pool, community, &fresh, later).await;
+
+        let db = Db::from_pool(pool.clone());
+        assert!(
+            !db.nip43_membership_snapshot_needs_reconciliation(
+                community,
+                &relay.public_key()
+            )
+            .await
+            .expect("reconciliation"),
+            "canonical members match the later received_at snapshot; id ASC would have picked the stale smaller id"
         );
     }
 }
