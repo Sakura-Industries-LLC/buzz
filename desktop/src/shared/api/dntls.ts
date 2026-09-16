@@ -15,6 +15,8 @@ const DNTLS_REQUEST_TIMEOUT_MS = 15_000;
 export type DntlsVerifiedName = {
   fqdn: string;
   approvedAt: number;
+  agent?: boolean;
+  owner?: string | null;
 };
 
 export type DntlsNamesMap = Map<string, DntlsVerifiedName>;
@@ -34,6 +36,8 @@ type RawDntlsName = {
   pubkey?: unknown;
   fqdn?: unknown;
   approved_at?: unknown;
+  agent?: unknown;
+  owner?: unknown;
 };
 
 type RawDntlsNamesResponse = {
@@ -123,7 +127,11 @@ function parseNames(payload: RawDntlsNamesResponse): DntlsNamesMap {
       Number.isFinite(entry.approved_at)
         ? entry.approved_at
         : 0;
-    names.set(pubkey, { fqdn, approvedAt });
+    const owner =
+      entry.agent === true && typeof entry.owner === "string"
+        ? entry.owner.trim().toLowerCase()
+        : null;
+    names.set(pubkey, { fqdn, approvedAt, agent: entry.agent === true, owner });
   }
   return names;
 }

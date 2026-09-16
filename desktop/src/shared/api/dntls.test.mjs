@@ -61,6 +61,8 @@ test("fetchDntlsNames maps pubkey to fqdn and approvedAt", async () => {
                 pubkey: PUBKEY.toUpperCase(),
                 fqdn: "alice.example",
                 approved_at: 1700000000,
+                agent: true,
+                owner: "owner.example",
               },
             ],
           }),
@@ -70,7 +72,17 @@ test("fetchDntlsNames maps pubkey to fqdn and approvedAt", async () => {
         const names = await fetchDntlsNames();
         assert.deepEqual(
           [...names.entries()],
-          [[PUBKEY, { fqdn: "alice.example", approvedAt: 1700000000 }]],
+          [
+            [
+              PUBKEY,
+              {
+                fqdn: "alice.example",
+                approvedAt: 1700000000,
+                agent: true,
+                owner: "owner.example",
+              },
+            ],
+          ],
         );
       },
     );

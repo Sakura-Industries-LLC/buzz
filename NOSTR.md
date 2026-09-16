@@ -126,7 +126,9 @@ that remains a manual admin action. A nonempty list requires
 
 In `approve` mode, a verified subname inherits membership (never the admin
 role) from its nearest approved DNTLS ancestor in the same community, with
-`approved_by` set to that ancestor's pubkey.
+`approved_by` set to that ancestor's pubkey and `admitted_via_parent` set to
+its name. This provenance survives key rebinding. Direct approval and auto
+admission do not infer agent status from a name's suffix.
 
 In `auto` mode, or for a listed admin in `approve` mode, a verified name can
 rebind to a new key. The displaced key keeps ordinary membership; a listed
@@ -144,8 +146,21 @@ seeds it, and the connector forwards `Host: <name>`. Desktop AUTH `relay` tags
 and NIP-98 `u` tags are always `wss://<name>` / `https://<name>/…`; the
 connector loopback URL is transport only.
 
-`GET /api/dntls/names` returns the approved mappings `{ pubkey, fqdn, approved_at }`
-for members. The desktop verified-name badge reads this list.
+`GET /api/dntls/names` returns the approved mappings
+`{ pubkey, fqdn, approved_at, agent, owner }` for members. `agent` is true
+only for a recorded parent-rule admission; `owner` is that parent name, or
+null for direct admissions. The relay-signed kind:13534 snapshot includes a
+`["dntls-agent", "<agent-pubkey>", "<parent-name>"]` tag for each such member.
+The desktop resolves the parent's current pubkey from the same names list
+and accepts agent policy only when signed by that parent. Kind:0 profiles
+remain tagless in DNTLS communities.
+
+Migration 0043 leaves historical provenance unset. `approved_by` alone cannot
+distinguish an inherited admission from manual approval by the same person.
+Before relying on discovery for an existing agent, the operator must verify
+its original admission and explicitly set that application's
+`admitted_via_parent` to the approved ancestor name. Do not bulk-classify old
+rows by suffix. No live admission records are changed by this migration.
 
 ### Group Discovery
 

@@ -7,6 +7,7 @@ import {
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import type { ChannelMember } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { useDntlsNamesQuery } from "@/features/profile/useDntlsNames";
 
 import { compareMembersByRole } from "./memberUtils";
 
@@ -17,6 +18,7 @@ export function useClassifiedMembers(
   const managedAgentsQuery = useManagedAgentsQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
   const isArchived = useIsArchivedPredicate();
+  const verifiedNames = useDntlsNamesQuery().data;
 
   const managedAgents = managedAgentsQuery.data ?? [];
   const relayAgents = relayAgentsQuery.data ?? [];
@@ -33,13 +35,15 @@ export function useClassifiedMembers(
   const isBot = React.useCallback(
     (member: ChannelMember) => {
       const normalized = normalizePubkey(member.pubkey);
+      const verified = verifiedNames?.get(normalized);
+      if (verified) return verified.agent === true;
       return (
         member.role === "bot" ||
         managedAgentPubkeys.has(normalized) ||
         relayAgentPubkeys.has(normalized)
       );
     },
-    [managedAgentPubkeys, relayAgentPubkeys],
+    [managedAgentPubkeys, relayAgentPubkeys, verifiedNames],
   );
 
   const isMyBot = React.useCallback(
@@ -57,7 +61,11 @@ export function useClassifiedMembers(
     const botList: ChannelMember[] = [];
     const archivedList: ChannelMember[] = [];
 
-    for (const member of members) {
+    for (const rawMember of members) {
+      const verified = verifiedNames?.get(normalizePubkey(rawMember.pubkey));
+      const member = verified
+        ? { ...rawMember, displayName: verified.fqdn }
+        : rawMember;
       if (isArchived(member.pubkey)) {
         archivedList.push(member);
         continue;
@@ -79,7 +87,7 @@ export function useClassifiedMembers(
       bots: sort(botList),
       archived: sort(archivedList),
     };
-  }, [currentPubkey, isArchived, isBot, members]);
+  }, [currentPubkey, isArchived, isBot, members, verifiedNames]);
 
   return {
     people,

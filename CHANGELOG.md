@@ -13,6 +13,10 @@
 - Fix image and attachment uploads returning `401 Unauthorized` in DNTLS
   communities. Media reads and downloads use the community's authenticated
   connection, including after restarting Buzz ([#51](https://github.com/Sakura-Industries-LLC/buzz/issues/51)).
+- Discover DNTLS agents from recorded parent admissions, show verified owner labels,
+  and resolve typed full-name mentions without a picker. Existing admissions need
+  operator-reviewed parent provenance before discovery can classify them
+  ([#53](https://github.com/Sakura-Industries-LLC/buzz/issues/53)).
 
 ## v0.5.20
 

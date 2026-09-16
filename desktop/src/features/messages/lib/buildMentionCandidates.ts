@@ -141,6 +141,7 @@ export function buildMentionCandidates({
       kind: "identity",
       pubkey,
       displayName:
+        profile?.verifiedDntlsName?.trim() ||
         member.displayName?.trim() ||
         agentName ||
         profile?.displayName?.trim() ||

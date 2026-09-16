@@ -58,6 +58,7 @@ import {
   type MentionCandidate,
 } from "./mentionCandidates";
 import { buildMentionCandidates } from "./buildMentionCandidates";
+import { useDntlsNamesQuery } from "@/features/profile/useDntlsNames";
 const MENTION_DEBOUNCE_MS = 120,
   MENTION_SUGGESTION_LIMIT = 50;
 type UseMentionsOptions = {
@@ -93,6 +94,7 @@ export function useMentions(
     ? normalizePubkey(identityQuery.data.pubkey)
     : null;
   const membersQuery = useChannelMembersQuery(channelId);
+  const verifiedNames = useDntlsNamesQuery().data;
   const members = externalMembers ?? membersQuery.data;
   const isArchivedDiscovery = useIsArchivedPredicate();
   const managedAgentsQuery = useManagedAgentsQuery();
@@ -661,6 +663,7 @@ export function useMentions(
         selectedMentions: mentionMapRef.current,
         selectedDisplayNames: personaMentionMapRef.current.keys(),
         memberCandidates: mentionCandidates,
+        verifiedNames,
       });
       return filterAdmittedMentionPubkeys(
         extracted,
@@ -671,7 +674,12 @@ export function useMentions(
         admittedAgentPubkeys,
       );
     },
-    [admittedAgentPubkeys, agentIdentityPubkeys, mentionCandidates],
+    [
+      admittedAgentPubkeys,
+      agentIdentityPubkeys,
+      mentionCandidates,
+      verifiedNames,
+    ],
   );
   const getSelectedAgentPubkeys = React.useRef(
     () => selectedAgentMentionPubkeysRef.current,

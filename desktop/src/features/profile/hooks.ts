@@ -276,12 +276,26 @@ export function useUnfollowMutation(currentPubkey?: string) {
 }
 
 export function useUserProfileQuery(pubkey?: string) {
-  return useQuery({
+  const names = useDntlsNamesQuery().data;
+  const query = useQuery({
     enabled: typeof pubkey === "string" && pubkey.length > 0,
     queryKey: ["user-profile", pubkey?.toLowerCase() ?? ""],
     queryFn: () => getUserProfile(pubkey),
     staleTime: 60_000,
   });
+  const data = React.useMemo(() => {
+    if (!query.data || !pubkey || !names?.has(pubkey.toLowerCase()))
+      return query.data;
+    return {
+      ...query.data,
+      ...mergeVerifiedDntlsNames(
+        { [pubkey.toLowerCase()]: query.data },
+        names,
+        [pubkey.toLowerCase()],
+      )[pubkey.toLowerCase()],
+    };
+  }, [query.data, pubkey, names]);
+  return { ...query, data };
 }
 
 // Per-pubkey resolution cache backing `useUsersBatchQuery`'s delta fetch.
@@ -417,17 +431,19 @@ export function useUsersBatchQuery(
     }
   }, [query.data, query.dataUpdatedAt, queryClient]);
 
-  // Keep attestations out of the nickname caches; a new names snapshot must
-  // update labels even while the kind:0 batch is fresh or has no profile.
+  // Keep attestations out of nickname caches so each names snapshot is current.
   const data = React.useMemo(() => {
     if (!dntlsNamesQuery.data?.size) return query.data;
+    const profiles = mergeVerifiedDntlsNames(
+      query.data?.profiles,
+      dntlsNamesQuery.data,
+      pubkeysKey.split(","),
+    );
     return {
-      profiles: mergeVerifiedDntlsNames(
-        query.data?.profiles,
-        dntlsNamesQuery.data,
-        pubkeysKey.split(","),
+      profiles,
+      missing: (query.data?.missing ?? []).filter(
+        (pubkey) => !profiles[pubkey],
       ),
-      missing: query.data?.missing ?? [],
     };
   }, [query.data, dntlsNamesQuery.data, pubkeysKey]);
   return { ...query, data };

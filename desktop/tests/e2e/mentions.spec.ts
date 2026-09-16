@@ -3663,3 +3663,99 @@ test("delayed inaccessible agent profile keeps all actions hidden", async ({
     ),
   ).toHaveCount(0);
 });
+
+test("DNTLS admission identifies tagless agents for nonowner mentions and member labels", async ({
+  page,
+}) => {
+  const agent = ALLOWLIST_RELAY_AGENT_PUBKEY;
+  const owner = TEST_IDENTITIES.outsider.pubkey;
+  await page.route("**/api/dntls/names", (route) =>
+    route.fulfill({
+      json: {
+        names: [
+          {
+            pubkey: agent,
+            fqdn: "cheer.buzz.josh.dntls",
+            approved_at: 1,
+            agent: true,
+            owner: "buzz.josh.dntls",
+          },
+          {
+            pubkey: owner,
+            fqdn: "buzz.josh.dntls",
+            approved_at: 1,
+            agent: false,
+            owner: null,
+          },
+        ],
+      },
+    }),
+  );
+  await installMockBridge(page, {
+    ownerOnlyAccessBuild: true,
+    searchProfiles: [
+      { pubkey: agent, displayName: "untrusted label", isAgent: false },
+    ],
+    relayAgents: [
+      {
+        pubkey: agent,
+        ownerPubkey: owner,
+        name: "cheer.buzz.josh.dntls",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.evaluate(
+    async ({ agent, channelId }) => {
+      await window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("add_channel_members", {
+        channelId,
+        pubkeys: [agent],
+        role: "member",
+      });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels"],
+      });
+    },
+    { agent, channelId: GENERAL_CHANNEL_ID },
+  );
+  const input = page.getByTestId("message-input");
+  await input.fill("@cheer");
+  const suggestion = autocomplete(page).getByTestId(
+    `mention-suggestion-${agent}`,
+  );
+  await expect(suggestion).toContainText("agent");
+  await expect(suggestion).toContainText("managed by buzz.josh.dntls");
+  await input.fill("@cheer.buzz.josh.dntls hello");
+  await page.keyboard.press("Escape");
+  await page.getByTestId("send-message").click();
+  await expect
+    .poll(() =>
+      readOutgoingMentionPubkeys(page, "@cheer.buzz.josh.dntls hello"),
+    )
+    .toContain(agent);
+  await page.getByTestId("channel-members-trigger").click();
+  const dialog = page.getByRole("dialog", { name: "Channel members" });
+  await expect(dialog).toContainText("cheer.buzz.josh.dntls");
+  await expect(dialog).toContainText("managed by buzz.josh.dntls");
+  await expect(dialog).not.toContainText("untrusted label");
+  await page.keyboard.press("Escape");
+  await waitForMockLiveSubscription(page, "general");
+  await emitMockMessage(page, "general", "Verified agent profile check", {
+    pubkey: agent,
+  });
+  await waitForTimelineSettled(page);
+  await page
+    .getByTestId("message-row")
+    .filter({ hasText: "Verified agent profile check" })
+    .first()
+    .locator("button")
+    .first()
+    .hover();
+  await expect(
+    page.getByTestId(`user-profile-popover-owner-${agent}`),
+  ).toHaveText("managed by buzz.josh.dntls");
+});

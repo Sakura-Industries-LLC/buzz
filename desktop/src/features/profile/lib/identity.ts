@@ -1,3 +1,4 @@
+import type { DntlsVerifiedName } from "@/shared/api/dntls";
 import type { Profile, UserProfileSummary } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 
@@ -212,10 +213,16 @@ export function formatOwnerLabel(
  */
 export function mergeVerifiedDntlsNames(
   profiles: UserProfileLookup | undefined,
-  names: ReadonlyMap<string, { fqdn: string; approvedAt: number }>,
+  names: ReadonlyMap<string, DntlsVerifiedName>,
   pubkeys?: readonly string[],
 ): UserProfileLookup {
   const merged: UserProfileLookup = { ...(profiles ?? {}) };
+  const pubkeysByName = new Map(
+    [...names].map(([pubkey, name]) => [
+      name.fqdn.toLowerCase(),
+      normalizePubkey(pubkey),
+    ]),
+  );
   for (const pubkey of pubkeys ?? names.keys()) {
     const key = normalizePubkey(pubkey);
     const name = names.get(key);
@@ -226,8 +233,11 @@ export function mergeVerifiedDntlsNames(
       name: existing?.name ?? null,
       avatarUrl: existing?.avatarUrl ?? null,
       nip05Handle: existing?.nip05Handle ?? null,
-      ownerPubkey: existing?.ownerPubkey ?? null,
-      isAgent: existing?.isAgent,
+      ownerPubkey:
+        name.agent && name.owner
+          ? (pubkeysByName.get(name.owner.toLowerCase()) ?? null)
+          : null,
+      isAgent: name.agent === true,
       verifiedDntlsName: name.fqdn,
       dntlsApprovedAt: name.approvedAt,
     };

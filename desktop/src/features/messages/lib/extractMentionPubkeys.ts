@@ -1,4 +1,5 @@
 import { getMentionOffsets } from "./hasMention";
+import type { DntlsVerifiedName } from "@/shared/api/dntls";
 
 export type MentionPubkeyCandidate = {
   displayName: string | null;
@@ -25,12 +26,17 @@ export function extractMentionPubkeys({
   selectedMentions,
   selectedDisplayNames,
   memberCandidates,
+  verifiedNames,
 }: {
   text: string;
   selectedMentions: ReadonlyMap<string, string>;
   selectedDisplayNames?: Iterable<string>;
   memberCandidates: readonly MentionPubkeyCandidate[];
+  verifiedNames?: ReadonlyMap<string, DntlsVerifiedName>;
 }): string[] {
+  const verifiedLabels = new Set(
+    [...(verifiedNames?.values() ?? [])].map((name) => name.fqdn.toLowerCase()),
+  );
   const selectedNames = new Set(
     [...selectedMentions.keys(), ...(selectedDisplayNames ?? [])].map(
       normalizeDisplayName,
@@ -41,8 +47,16 @@ export function extractMentionPubkeys({
   const addMatches = (displayName: string, pubkey?: string) => {
     const trimmedName = displayName.trim();
     if (!trimmedName) return;
+    const verified = verifiedLabels.has(trimmedName.toLowerCase());
 
     for (const offset of getMentionOffsets(text, trimmedName)) {
+      if (
+        verified &&
+        /^(?:[a-z0-9-]|\.[a-z0-9-])/i.test(
+          text.slice(offset + trimmedName.length + 1),
+        )
+      )
+        continue;
       const matches = matchesByOffset.get(offset) ?? [];
       matches.push({ displayName: trimmedName, pubkey });
       matchesByOffset.set(offset, matches);
@@ -63,6 +77,15 @@ export function extractMentionPubkeys({
       !selectedNames.has(normalizeDisplayName(candidate.displayName))
     ) {
       addMatches(candidate.displayName, candidate.pubkey);
+    }
+  }
+  for (const [pubkey, name] of verifiedNames ?? []) {
+    // Dots delimit DNS labels, not mention punctuation inside a longer name.
+    for (const offset of getMentionOffsets(text, name.fqdn)) {
+      const rest = text.slice(offset + name.fqdn.length + 1);
+      if (/^(?:[a-z0-9-]|\.[a-z0-9-])/i.test(rest)) continue;
+      // Verified names override selected/self-asserted display-name aliases.
+      matchesByOffset.set(offset, [{ displayName: name.fqdn, pubkey }]);
     }
   }
 
@@ -86,6 +109,9 @@ export function extractMentionPubkeys({
     if (candidate.pubkey && winningPubkeys.delete(candidate.pubkey)) {
       pubkeys.push(candidate.pubkey);
     }
+  }
+  for (const [pubkey] of verifiedNames ?? []) {
+    if (winningPubkeys.delete(pubkey)) pubkeys.push(pubkey);
   }
   return pubkeys;
 }

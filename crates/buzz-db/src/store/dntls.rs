@@ -53,6 +53,8 @@ pub struct DntlsApplication {
     pub approved_at: Option<DateTime<Utc>>,
     /// Approving pubkey: owner/admin, caller in auto mode, or approved ancestor.
     pub approved_by: Option<String>,
+    /// Approved ancestor whose admission this name inherited; never profile supplied.
+    pub admitted_via_parent: Option<String>,
 }
 
 fn map_application_row(row: &sqlx::postgres::PgRow) -> DntlsApplication {
@@ -63,6 +65,7 @@ fn map_application_row(row: &sqlx::postgres::PgRow) -> DntlsApplication {
         created_at: row.get("created_at"),
         approved_at: row.get("approved_at"),
         approved_by: row.get("approved_by"),
+        admitted_via_parent: row.get("admitted_via_parent"),
     }
 }
 
@@ -228,7 +231,7 @@ pub async fn upsert_pending_application(
             let update = sqlx::query(
                 "UPDATE dntls_applications \
                  SET fqdn = $3, status = 'pending', created_at = now(), \
-                     approved_at = NULL, approved_by = NULL \
+                     approved_at = NULL, approved_by = NULL, admitted_via_parent = NULL \
                  WHERE community_id = $1 AND pubkey = $2 AND status = 'pending' AND fqdn <> $3",
             )
             .bind(community.as_uuid())
@@ -286,12 +289,13 @@ pub async fn upsert_pending_application(
         };
         sqlx::query(
             "UPDATE dntls_applications \
-             SET status = 'approved', approved_at = now(), approved_by = $3 \
+             SET status = 'approved', approved_at = now(), approved_by = $3, admitted_via_parent = $4 \
              WHERE community_id = $1 AND pubkey = $2",
         )
         .bind(community.as_uuid())
         .bind(pubkey)
         .bind(approved_by)
+        .bind(ancestor)
         .execute(&mut *tx)
         .await?;
         let membership_changed = super::relay_members::insert_relay_member_on(
@@ -413,7 +417,7 @@ pub async fn get_application(
     pubkey: &str,
 ) -> Result<Option<DntlsApplication>> {
     let row = sqlx::query(
-        "SELECT pubkey, fqdn, status, created_at, approved_at, approved_by \
+        "SELECT pubkey, fqdn, status, created_at, approved_at, approved_by, admitted_via_parent \
          FROM dntls_applications WHERE community_id = $1 AND pubkey = $2",
     )
     .bind(community.as_uuid())
@@ -430,7 +434,7 @@ pub async fn list_applications(
     status: &str,
 ) -> Result<Vec<DntlsApplication>> {
     let rows = sqlx::query(
-        "SELECT pubkey, fqdn, status, created_at, approved_at, approved_by \
+        "SELECT pubkey, fqdn, status, created_at, approved_at, approved_by, admitted_via_parent \
          FROM dntls_applications \
          WHERE community_id = $1 AND status = $2 \
          ORDER BY created_at ASC",
@@ -460,10 +464,10 @@ pub async fn approve_application(
     lock_application_bindings(&mut tx, community).await?;
     let row = match sqlx::query(
         "UPDATE dntls_applications \
-         SET status = 'approved', approved_at = now(), approved_by = $3 \
+         SET status = 'approved', approved_at = now(), approved_by = $3, admitted_via_parent = NULL \
          WHERE community_id = $1 AND pubkey = $2 \
            AND status IN ('pending', 'rejected') AND fqdn = $4 \
-         RETURNING pubkey, fqdn, status, created_at, approved_at, approved_by",
+         RETURNING pubkey, fqdn, status, created_at, approved_at, approved_by, admitted_via_parent",
     )
     .bind(community.as_uuid())
     .bind(pubkey)
@@ -1482,5 +1486,31 @@ mod tests {
             .await
             .expect("stale rejected approve")
             .is_none());
+    }
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn direct_approval_of_descendant_never_becomes_inherited() {
+        let (db, community) = test_db().await;
+        let parent = "aa".repeat(32);
+        let child = "bb".repeat(32);
+        db.upsert_dntls_pending_application(community, &child, "child.owner.dntls")
+            .await
+            .unwrap();
+        db.approve_dntls_application(community, &child, "child.owner.dntls", &parent, false)
+            .await
+            .unwrap()
+            .unwrap();
+        db.upsert_dntls_approved_application(community, &parent, "owner.dntls", &parent, false)
+            .await
+            .unwrap();
+        db.upsert_dntls_pending_application(community, &child, "child.owner.dntls")
+            .await
+            .unwrap();
+        let row = db
+            .get_dntls_application(community, &child)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.admitted_via_parent, None);
     }
 }

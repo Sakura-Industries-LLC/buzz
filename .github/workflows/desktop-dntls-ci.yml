@@ -95,6 +95,8 @@ jobs:
         run: cd desktop && pnpm exec playwright install-deps chromium
       - name: Desktop dntls admission e2e
         run: cd desktop && pnpm exec playwright test --project=integration tests/e2e/dntls-onboarding-approval.spec.ts
+      - name: Desktop dntls agent discovery e2e
+        run: cd desktop && pnpm exec playwright test --project=smoke tests/e2e/mentions.spec.ts --grep 'DNTLS admission identifies'
       - name: Upload desktop dntls e2e artifacts
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -196,3 +198,5 @@ jobs:
         run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml --lib dntls_connector
       - name: Authenticated media tests
         run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml --lib commands::media
+      - name: DNTLS agent ownership and policy regression
+        run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml --lib nostr_convert::tests

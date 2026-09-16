@@ -207,6 +207,16 @@ export function MembersSidebar({
   const memberProfilesQuery = useUsersBatchQuery(allMemberPubkeys, {
     enabled: open && rawMembers.length > 0,
   });
+  const memberOwnerPubkeys = React.useMemo(
+    () =>
+      Object.values(memberProfilesQuery.data?.profiles ?? {}).flatMap(
+        (profile) => (profile.ownerPubkey ? [profile.ownerPubkey] : []),
+      ),
+    [memberProfilesQuery.data],
+  );
+  const memberOwnerProfilesQuery = useUsersBatchQuery(memberOwnerPubkeys, {
+    enabled: open && memberOwnerPubkeys.length > 0,
+  });
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
   const deferredSearchQuery = React.useDeferredValue(searchQuery.trim());
   const normalizedDeferredSearchQuery = deferredSearchQuery.toLowerCase();
@@ -669,6 +679,11 @@ export function MembersSidebar({
           memberProfilesQuery.data?.profiles[normalizePubkey(member.pubkey)]
             ?.verifiedDntlsName || formatMemberName(member, currentPubkey)
         }
+        ownerLabel={formatOwnerLabel(
+          memberProfile?.ownerPubkey,
+          currentPubkey,
+          memberOwnerProfilesQuery.data?.profiles,
+        )}
         moderationState={moderationStateByPubkey.get(
           normalizePubkey(member.pubkey),
         )}

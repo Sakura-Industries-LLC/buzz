@@ -582,7 +582,7 @@ fn relay_agent_directory_preserves_headless_profiles_and_prefers_verified_manage
     let agents = relay_agents_from_directory_events(
         &[headless_profile, stale_managed_profile],
         std::slice::from_ref(&managed_policy),
-        std::slice::from_ref(&managed_identity),
+        &verified_agent_owners_from_profiles(std::slice::from_ref(&managed_identity)),
     );
 
     assert_eq!(agents.len(), 2);
@@ -639,7 +639,11 @@ fn authenticated_malformed_managed_policy_does_not_fall_back_to_legacy_permissio
     .sign_with_keys(&owner_keys)
     .expect("sign managed policy");
 
-    let agents = relay_agents_from_directory_events(&[legacy], &[malformed], &[profile]);
+    let agents = relay_agents_from_directory_events(
+        &[legacy],
+        &[malformed],
+        &verified_agent_owners_from_profiles(&[profile]),
+    );
 
     assert!(agents.is_empty());
 }
@@ -668,8 +672,9 @@ fn relay_agent_directory_resolves_equal_timestamp_heads_by_event_id() {
         "Second"
     };
 
-    let forward = relay_agents_from_directory_events(&[first.clone(), second.clone()], &[], &[]);
-    let reverse = relay_agents_from_directory_events(&[second, first], &[], &[]);
+    let forward =
+        relay_agents_from_directory_events(&[first.clone(), second.clone()], &[], &HashMap::new());
+    let reverse = relay_agents_from_directory_events(&[second, first], &[], &HashMap::new());
 
     assert_eq!(forward.len(), 1);
     assert_eq!(reverse.len(), 1);
@@ -707,7 +712,7 @@ fn forged_managed_policy_cannot_suppress_a_headless_directory_agent() {
     let agents = relay_agents_from_directory_events(
         &[targeted_profile, headless],
         std::slice::from_ref(&forged_policy),
-        &[],
+        &HashMap::new(),
     );
 
     assert_eq!(agents.len(), 2);
@@ -759,4 +764,51 @@ fn timestamp_to_iso_known_value() {
     assert_eq!(timestamp_to_iso(1_609_459_200), "2021-01-01T00:00:00Z");
     // Epoch
     assert_eq!(timestamp_to_iso(0), "1970-01-01T00:00:00Z");
+}
+
+#[test]
+fn dntls_directory_uses_attested_parent_without_profile_auth_tag() {
+    let agent = Keys::generate();
+    let owner = Keys::generate();
+    let stranger = Keys::generate();
+    let agent_pubkey = agent.public_key().to_hex();
+    let owner_pubkey = owner.public_key().to_hex();
+    let policy = managed_agent_event(
+        &owner,
+        &agent_pubkey,
+        "cheer.buzz.josh.dntls",
+        "allowlist",
+        &[stranger.public_key().to_hex()],
+    );
+    let forged = managed_agent_event(&stranger, &agent_pubkey, "forged", "anyone", &[]);
+    let names = vec![
+        crate::relay::dntls_names::VerifiedName {
+            pubkey: agent_pubkey.clone(),
+            fqdn: "cheer.buzz.josh.dntls".into(),
+            agent: true,
+            owner: Some("buzz.josh.dntls".into()),
+        },
+        crate::relay::dntls_names::VerifiedName {
+            pubkey: owner_pubkey.clone(),
+            fqdn: "buzz.josh.dntls".into(),
+            agent: false,
+            owner: None,
+        },
+    ];
+    let owners = crate::relay::dntls_names::owners(&names);
+    let agents = relay_agents_from_directory_events(&[], &[policy, forged], &owners);
+    assert_eq!(agents.len(), 1);
+    assert_eq!(
+        agents[0].owner_pubkey.as_deref(),
+        Some(owner_pubkey.as_str())
+    );
+    assert_eq!(
+        agents[0].respond_to,
+        Some(crate::managed_agents::RespondTo::Allowlist)
+    );
+    assert_eq!(
+        agents[0].respond_to_allowlist,
+        [stranger.public_key().to_hex()]
+    );
+    assert!(!owners.contains_key(&owner_pubkey));
 }

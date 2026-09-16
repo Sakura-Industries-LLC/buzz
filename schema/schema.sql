@@ -636,6 +636,7 @@ CREATE TABLE dntls_applications (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     approved_at  TIMESTAMPTZ,
     approved_by  TEXT,
+    admitted_via_parent TEXT,
     PRIMARY KEY (community_id, pubkey),
     UNIQUE (community_id, fqdn),
     CHECK (

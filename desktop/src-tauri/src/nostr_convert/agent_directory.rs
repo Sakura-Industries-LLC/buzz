@@ -53,15 +53,16 @@ fn relay_agents_from_legacy_events(events: &[Event]) -> Vec<RelayAgentInfo> {
         .collect()
 }
 
-/// Merge self-authored kind:10100 runtime profiles with verified Desktop-managed
-/// policy records. A verified managed coordinate reserves the agent identity even
-/// when its current policy is malformed, so stale legacy permissions cannot win.
+/// Merge self-authored kind:10100 runtime profiles with owner-signed policy.
+/// The caller supplies ownership verified through NIP-OA or DNTLS admission.
+/// A verified coordinate reserves the identity even when its current policy is
+/// malformed, so stale legacy permissions cannot win.
 pub fn relay_agents_from_directory_events(
     directory_events: &[Event],
     managed_agent_events: &[Event],
-    profile_events: &[Event],
+    verified_owners: &HashMap<String, String>,
 ) -> Vec<RelayAgentInfo> {
-    let verified_policies = latest_verified_managed_policies(managed_agent_events, profile_events);
+    let verified_policies = latest_verified_managed_policies(managed_agent_events, verified_owners);
     let mut agents: HashMap<String, RelayAgentInfo> =
         relay_agents_from_legacy_events(directory_events)
             .into_iter()
@@ -103,10 +104,8 @@ pub fn verified_agent_owners_from_profiles(events: &[Event]) -> HashMap<String, 
 
 fn latest_verified_managed_policies<'a>(
     managed_agent_events: &'a [Event],
-    profile_events: &[Event],
+    verified_owners: &HashMap<String, String>,
 ) -> HashMap<String, &'a Event> {
-    let verified_owners = verified_agent_owners_from_profiles(profile_events);
-
     let mut latest: HashMap<String, &'a Event> = HashMap::new();
     for event in managed_agent_events {
         let Some(agent_pubkey) = first_tag_value(event, "d") else {
@@ -148,7 +147,8 @@ pub fn relay_agents_from_managed_agent_events(
     managed_agent_events: &[Event],
     profile_events: &[Event],
 ) -> Vec<RelayAgentInfo> {
-    let mut agents: Vec<_> = latest_verified_managed_policies(managed_agent_events, profile_events)
+    let owners = verified_agent_owners_from_profiles(profile_events);
+    let mut agents: Vec<_> = latest_verified_managed_policies(managed_agent_events, &owners)
         .into_iter()
         .filter_map(|(agent_pubkey, event)| relay_agent_from_managed_policy(&agent_pubkey, event))
         .collect();

@@ -222,3 +222,42 @@ test("mergeVerifiedDntlsNames overlays attested names without changing unverifie
   assert.equal(merged[other].verifiedDntlsName, undefined);
   assert.equal(merged[other].displayName, "Bea");
 });
+
+test("DNTLS admission overrides profile ownership and resolves the current parent key", () => {
+  const names = new Map([
+    [
+      USER_PUBKEY,
+      {
+        fqdn: "cheer.buzz.josh.dntls",
+        approvedAt: 1,
+        agent: true,
+        owner: "buzz.josh.dntls",
+      },
+    ],
+    [
+      OWNER_PUBKEY,
+      { fqdn: "buzz.josh.dntls", approvedAt: 1, agent: false, owner: null },
+    ],
+  ]);
+  const merged = mergeVerifiedDntlsNames(
+    {
+      [USER_PUBKEY]: summary({ ownerPubkey: "forged", isAgent: false }),
+      [OWNER_PUBKEY]: summary({
+        displayName: "untrusted label",
+        ownerPubkey: USER_PUBKEY,
+        isAgent: true,
+      }),
+    },
+    names,
+  );
+  assert.equal(merged[USER_PUBKEY].isAgent, true);
+  assert.equal(merged[USER_PUBKEY].ownerPubkey, OWNER_PUBKEY);
+  assert.equal(formatOwnerLabel(OWNER_PUBKEY, null, merged), "buzz.josh.dntls");
+  assert.equal(merged[OWNER_PUBKEY].isAgent, false);
+  assert.equal(merged[OWNER_PUBKEY].ownerPubkey, null);
+  names.delete(OWNER_PUBKEY);
+  assert.equal(
+    mergeVerifiedDntlsNames(merged, names)[USER_PUBKEY].ownerPubkey,
+    null,
+  );
+});
