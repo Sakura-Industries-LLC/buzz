@@ -1,12 +1,22 @@
-# Frontend-only gate; this fork leaves upstream CI disabled.
+# Frontend gate plus the native DNTLS connector's Rust gate; this fork leaves
+# upstream CI disabled, so desktop/src-tauri never reaches a compiler without
+# the connector job below.
 name: Desktop dntls CI
 
 on:
   pull_request:
     branches: [dntls]
+    # Union of both jobs' inputs. Which job actually runs is decided by the
+    # `changes` filter below, so a Rust-only pull request does not pay for the
+    # frontend job's Playwright run, and a frontend-only one does not pay for a
+    # Tauri compile.
     paths:
       - 'desktop/**'
-      - '!desktop/src-tauri/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'justfile'
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
@@ -21,10 +31,51 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Detect Changed Paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      frontend: ${{ steps.filter.outputs.frontend }}
+      connector: ${{ steps.filter.outputs.connector }}
+    steps:
+      # paths-filter diffs against the base commit locally, so it needs the
+      # checkout's credentials and one parent commit.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 2
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          token: ''
+          filters: |
+            frontend:
+              - 'desktop/**'
+              - '!desktop/src-tauri/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'patches/**'
+              - '.github/workflows/desktop-dntls-ci.yml'
+            connector:
+              - 'desktop/src-tauri/**'
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'justfile'
+              - 'pnpm-lock.yaml'
+              - '.github/workflows/desktop-dntls-ci.yml'
+
   desktop-dntls:
     name: Desktop dntls Frontend
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    needs: [changes]
+    if: needs.changes.outputs.frontend == 'true'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -53,4 +104,105 @@ jobs:
             desktop/playwright-report
             desktop/test-results
           if-no-files-found: ignore
+          retention-days: 7
+
+  # Exercise the connector on both supported desktop platforms.
+  desktop-dntls-connector:
+    name: DNTLS Connector Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Allow a cold Tauri dependency build.
+    timeout-minutes: 90
+    needs: [changes]
+    # The private SDK requires a read token; never expose it to fork PRs.
+    if: >-
+      needs.changes.outputs.connector == 'true' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      # Some vendored C dependencies still declare a pre-4.0 minimum, which the
+      # cmake hermit pins refuses without this. Matches ci.yml's desktop jobs.
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      # Pins the toolchain the repo builds with (rust-toolchain.toml 1.95.0) plus
+      # node, pnpm, just and cmake, on both runners.
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: Install Tauri system dependencies (Linux)
+        if: runner.os == 'Linux'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          sudo apt-get update \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30
+          sudo apt-get install -y --no-install-recommends \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            -o DPkg::Lock::Timeout=120 \
+            build-essential \
+            file \
+            libasound2-dev \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf
+      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+        if: runner.os == 'Linux'
+      # Same single-repository read token as the DNTLS release build.
+      - name: Create dntls-testnet read token
+        id: dntls-testnet
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SAKURA_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.SAKURA_RELEASE_APP_PRIVATE_KEY }}
+          owner: Sakura-Industries-LLC
+          repositories: dntls-testnet
+          permission-contents: read
+      - name: Route cargo's dntls-testnet fetch through the token
+        env:
+          DNTLS_TESTNET_TOKEN: ${{ steps.dntls-testnet.outputs.token }}
+        run: |
+          git config --global "url.https://x-access-token:${DNTLS_TESTNET_TOKEN}@github.com/Sakura-Industries-LLC/dntls-testnet.insteadOf" \
+            "https://github.com/Sakura-Industries-LLC/dntls-testnet"
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
+      - name: Install desktop dependencies
+        run: just desktop-install-ci
+      # Tauri embeds desktop/dist through generate_context!.
+      - name: Build desktop frontend assets
+        run: just desktop-build
+      # Tauri validates bundle.externalBin at compile time. The repo's own recipe
+      # writes the placeholder names for this host triple, so the sidecar list
+      # stays in one place.
+      - name: Create sidecar placeholders
+        run: just _ensure-sidecar-stubs
+      - name: DNTLS connector tests
+        run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml --lib dntls_connector
+      # Temporary source-build artifact for issue #47 desktop acceptance.
+      - name: Build the Linux acceptance executable
+        if: runner.os == 'Linux'
+        run: pnpm -C desktop tauri build --ci --debug --no-bundle
+      - name: Upload the Linux acceptance executable
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: buzz-desktop-linux-x86_64-source-build
+          path: desktop/src-tauri/target/debug/buzz-desktop
+          if-no-files-found: error
           retention-days: 7

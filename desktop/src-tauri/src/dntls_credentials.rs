@@ -91,7 +91,7 @@ fn portal_origin() -> String {
 }
 
 /// App data shared by credential storage and the community connector.
-pub(crate) fn dntls_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn dntls_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -101,7 +101,9 @@ pub(crate) fn dntls_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-pub(crate) fn credentials_bundle_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn credentials_bundle_path<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<PathBuf, String> {
     Ok(dntls_dir(app)?.join(CREDENTIALS_FILE))
 }
 
