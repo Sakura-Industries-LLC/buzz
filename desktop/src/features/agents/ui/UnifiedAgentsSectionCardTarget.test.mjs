@@ -41,6 +41,7 @@ let createElement;
 let QueryClient;
 let QueryClientProvider;
 let UnifiedAgentsSection;
+let CommunitiesProvider;
 
 const ipcHandlers = new Map();
 
@@ -118,7 +119,11 @@ function renderSection(props) {
     createElement(
       QueryClientProvider,
       { client },
-      createElement(UnifiedAgentsSection, props),
+      createElement(
+        CommunitiesProvider,
+        null,
+        createElement(UnifiedAgentsSection, props),
+      ),
     ),
   );
 }
@@ -128,6 +133,7 @@ before(async () => {
     document: dom.window.document,
     HTMLElement: dom.window.HTMLElement,
     window: dom.window,
+    localStorage: dom.window.localStorage,
     IS_REACT_ACT_ENVIRONMENT: true,
   });
   Object.defineProperty(globalThis, "navigator", {
@@ -157,6 +163,9 @@ before(async () => {
     "@tanstack/react-query"
   ));
   ({ UnifiedAgentsSection } = await import("./UnifiedAgentsSection.tsx"));
+  ({ CommunitiesProvider } = await import(
+    "@/features/communities/useCommunities.tsx"
+  ));
 });
 
 afterEach(() => {

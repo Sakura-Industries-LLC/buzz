@@ -148,8 +148,44 @@ async fn list_relay_agents_for_selection(
     let membership_events = query_all_relay_pages(state, membership_filter)
         .await
         .map_err(|error| format!("relay agent channel-membership query failed: {error}"))?;
+    let dntls_names = crate::relay::dntls_names::fetch(state).await?;
     let mut member_agent_channel_ids =
         nostr_convert::member_agent_channel_ids_from_events(&membership_events, &relay_pubkey);
+    if let Some(names) = &dntls_names {
+        // A verified DNTLS agent need not have a legacy channel bot role.
+        let agents: std::collections::HashSet<_> = names
+            .iter()
+            .filter(|name| name.agent)
+            .map(|name| name.pubkey.as_str())
+            .collect();
+        for event in &membership_events {
+            if event.pubkey.to_hex() != relay_pubkey {
+                continue;
+            }
+            let Some(channel) = event.tags.iter().find_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.first().map(String::as_str) == Some("d"))
+                    .then(|| parts.get(1))
+                    .flatten()
+            }) else {
+                continue;
+            };
+            for tag in event.tags.iter() {
+                let parts = tag.as_slice();
+                if parts.first().map(String::as_str) == Some("p") {
+                    if let Some(pubkey) = parts.get(1) {
+                        if agents.contains(pubkey.as_str()) {
+                            let channels =
+                                member_agent_channel_ids.entry(pubkey.clone()).or_default();
+                            if !channels.contains(channel) {
+                                channels.push(channel.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     if let Some(requested_pubkeys) = requested_pubkeys {
         member_agent_channel_ids.retain(|pubkey, _| requested_pubkeys.contains(pubkey));
     }
@@ -159,7 +195,11 @@ async fn list_relay_agents_for_selection(
     }
 
     let directory_filters = exact_author_filters(&candidate_pubkeys, 10100);
-    let profile_filters = exact_author_filters(&candidate_pubkeys, 0);
+    let profile_filters = if dntls_names.is_some() {
+        Vec::new()
+    } else {
+        exact_author_filters(&candidate_pubkeys, 0)
+    };
     // One semaphore per rebuild caps `/query` requests across this rebuild's
     // phases, so its runtime-directory and owner-profile phases below stay
     // within the ceiling even though `try_join!` runs them concurrently.
@@ -179,11 +219,11 @@ async fn list_relay_agents_for_selection(
         ),
     )?;
 
-    // Only the agent's signed NIP-OA profile can name the owner coordinate to
-    // query. Each exact `(owner, d=agent)` filter returns at most one current
-    // replaceable event, so forged 30177 coordinates cannot amplify or crowd
-    // the authentic policy out of a bounded result page.
-    let verified_owners = nostr_convert::verified_agent_owners_from_profiles(&profile_events);
+    // DNTLS admission, not a self-authored profile, selects the policy author.
+    let verified_owners = match &dntls_names {
+        Some(names) => crate::relay::dntls_names::owners(names),
+        None => nostr_convert::verified_agent_owners_from_profiles(&profile_events),
+    };
     let managed_filters = managed_policy_filters(&candidate_pubkeys, &verified_owners);
     let managed_agent_events = query_filter_batches(
         state,
@@ -196,15 +236,12 @@ async fn list_relay_agents_for_selection(
     let mut agents = nostr_convert::relay_agents_from_directory_events(
         &directory_events,
         &managed_agent_events,
-        &profile_events,
+        &verified_owners,
     );
-    // Marked builds reject legacy directory records that lack a verified
-    // NIP-OA owner, but do not require that owner to equal the viewer. The
-    // verified owner's signed respond_to policy remains the authorization
-    // boundary for independently operated relay agents.
+    // DNTLS communities and marked builds require a verified owner policy.
     retain_agents_allowed_by_build(
         &mut agents,
-        crate::managed_agents::owner_only_access_build(),
+        dntls_names.is_some() || crate::managed_agents::owner_only_access_build(),
     );
     agents.retain(|agent| member_agent_channel_ids.contains_key(&agent.pubkey));
     for agent in &mut agents {

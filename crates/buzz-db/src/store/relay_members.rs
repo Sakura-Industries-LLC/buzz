@@ -885,7 +885,31 @@ impl Db {
         snapshot_members.sort_unstable();
         canonical_members.sort_unstable();
 
-        Ok(snapshot_members != canonical_members)
+        let names = self
+            .list_dntls_applications(community_id, "approved")
+            .await?;
+        let mut canonical_agents: Vec<_> = names
+            .into_iter()
+            .filter_map(|name| name.admitted_via_parent.map(|owner| (name.pubkey, owner)))
+            .filter(|(pubkey, _)| {
+                canonical_members
+                    .binary_search_by(|(key, _)| key.cmp(pubkey))
+                    .is_ok()
+            })
+            .collect();
+        let mut snapshot_agents: Vec<_> = snapshot
+            .event
+            .tags
+            .iter()
+            .filter_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.first().map(String::as_str) == Some("dntls-agent") && parts.len() == 3)
+                    .then(|| (parts[1].clone(), parts[2].clone()))
+            })
+            .collect();
+        canonical_agents.sort_unstable();
+        snapshot_agents.sort_unstable();
+        Ok(snapshot_members != canonical_members || snapshot_agents != canonical_agents)
     }
 
     /// Atomically publish a NIP-43 membership snapshot under a single
@@ -936,8 +960,10 @@ impl Db {
 
         // Read current members inside the locked transaction.
         let rows = sqlx::query(
-            "SELECT pubkey, role FROM relay_members \
-             WHERE community_id = $1 ORDER BY created_at ASC",
+            "SELECT m.pubkey, m.role, d.admitted_via_parent FROM relay_members m \
+             LEFT JOIN dntls_applications d ON d.community_id = m.community_id \
+                 AND d.pubkey = m.pubkey AND d.status = 'approved' \
+             WHERE m.community_id = $1 ORDER BY m.created_at ASC",
         )
         .bind(community_id.as_uuid())
         .fetch_all(&mut *tx)
@@ -957,6 +983,11 @@ impl Db {
             tags.push(Tag::parse(["member", &pubkey, &role]).map_err(|e| {
                 crate::error::DbError::InvalidData(format!("failed to build member tag: {e}"))
             })?);
+            if let Some(owner) = row.try_get::<Option<String>, _>("admitted_via_parent")? {
+                tags.push(Tag::parse(["dntls-agent", &pubkey, &owner]).map_err(|e| {
+                    crate::error::DbError::InvalidData(format!("failed to build dntls-agent tag: {e}"))
+                })?);
+            }
         }
 
         let event = EventBuilder::new(Kind::Custom(kind_i32 as u16), "")

@@ -48,6 +48,16 @@ DNTLS agents run on this computer. Snapshot imports cannot supply each
 agent's credentials; create agents from templates and connect their names
 instead. Agent creation in non-DNTLS communities is unchanged.
 
+In approval-mode communities, agents admitted through an approved ancestor
+appear as agents for other members too. Their label shows the verified name
+and **managed by** the ancestor name. Typing `@<full-agent-name>` creates a
+mention without selecting a suggestion; the agent's owner-signed access
+policy still determines who can trigger it. A name approved directly is not
+classified as an agent merely because it is a subname.
+
+Existing admissions without recorded parent provenance need operator review
+before they appear this way; see [DNTLS admission](../NOSTR.md#dntls-admission).
+
 ## Scripts
 
 - `pnpm dev` - run the web frontend

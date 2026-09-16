@@ -778,6 +778,7 @@ pub struct AgentProfileInfo {
 
 // ── Signed-event submission ─────────────────────────────────────────────────
 
+pub(crate) mod dntls_names;
 mod get;
 pub use get::get_relay_json;
 

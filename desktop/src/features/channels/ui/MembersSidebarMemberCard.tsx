@@ -61,6 +61,7 @@ type MembersSidebarMemberCardProps = {
   memberAvatarLabel: string;
   memberIsBot: boolean;
   memberLabel: string;
+  ownerLabel?: string | null;
   moderationState?: MemberModerationState;
   onBan: (member: ChannelMember) => void;
   onChangeRole: (member: ChannelMember, role: string) => void;
@@ -130,6 +131,7 @@ export function MembersSidebarMemberCard({
   memberAvatarLabel,
   memberIsBot,
   memberLabel,
+  ownerLabel,
   moderationState,
   onBan,
   onChangeRole,
@@ -215,6 +217,11 @@ export function MembersSidebarMemberCard({
             ) : null}
           </div>
         )}
+        {memberIsBot && ownerLabel ? (
+          <p className="truncate text-xs text-muted-foreground">
+            managed by {ownerLabel}
+          </p>
+        ) : null}
         {managedAgentRuntime || managedAgent ? (
           <div className="mt-1 flex flex-wrap items-center gap-1.5">
             <Badge

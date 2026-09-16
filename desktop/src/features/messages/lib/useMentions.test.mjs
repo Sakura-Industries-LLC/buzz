@@ -245,3 +245,36 @@ test("requires matching inline-code delimiter lengths", () => {
   assert.equal(hasMention("`` @Alice ` still code ``", "Alice"), false);
   assert.equal(hasMention("`` @Alice `", "Alice"), true);
 });
+
+test("typed verified names resolve without a picker and beat forged display names", () => {
+  const verifiedNames = new Map([
+    ["agent", { fqdn: "cheer.buzz.josh.dntls", approvedAt: 1, agent: true }],
+  ]);
+  const input = {
+    selectedMentions: new Map(),
+    memberCandidates: [
+      {
+        pubkey: "impostor",
+        displayName: "cheer.buzz.josh.dntls",
+        isMember: true,
+      },
+    ],
+    verifiedNames,
+  };
+  assert.deepEqual(
+    extractMentionPubkeys({
+      ...input,
+      text: "@cheer.buzz.josh.dntls hi @cheer.buzz.josh.dntls!",
+    }),
+    ["agent"],
+  );
+  for (const text of [
+    "mail@cheer.buzz.josh.dntls",
+    "https://example/@cheer.buzz.josh.dntls",
+    "@cheer.buzz.josh.dntls.evil",
+    "@cheer.buzz.josh.dntls-extra",
+    "`@cheer.buzz.josh.dntls`",
+  ]) {
+    assert.deepEqual(extractMentionPubkeys({ ...input, text }), [], text);
+  }
+});

@@ -545,6 +545,8 @@ fn name_entry_json(row: &buzz_db::dntls::DntlsApplication) -> Value {
         "pubkey": row.pubkey,
         "fqdn": row.fqdn,
         "approved_at": row.approved_at.map(|ts| ts.timestamp()).unwrap_or(0),
+        "agent": row.admitted_via_parent.is_some(),
+        "owner": row.admitted_via_parent,
     })
 }
 
@@ -840,10 +842,13 @@ mod tests {
             created_at: approved_at,
             approved_at: Some(approved_at),
             approved_by: Some("cd".repeat(32)),
+            admitted_via_parent: None,
         });
         assert_eq!(json["fqdn"], "alice.example");
         assert_eq!(json["approved_at"], 1_700_000_000);
         assert_eq!(json["pubkey"], "ab".repeat(32));
+        assert_eq!(json["agent"], false);
+        assert!(json["owner"].is_null());
     }
 
     #[test]
@@ -2442,6 +2447,7 @@ mod tests {
             .unwrap();
         assert_eq!(row.status, "approved");
         assert_eq!(row.approved_by.as_deref(), Some(parent_hex.as_str()));
+        assert_eq!(row.admitted_via_parent.as_deref(), Some("josh.dntls"));
         let events = state
             .db
             .query_events(&buzz_db::EventQuery {
@@ -2468,6 +2474,15 @@ mod tests {
                 .iter()
                 .any(|tag| tag.as_slice() == expected));
         }
+        let snapshot = events
+            .iter()
+            .find(|stored| stored.event.kind.as_u16() == 13534)
+            .unwrap();
+        assert!(snapshot
+            .event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["dntls-agent", child_hex.as_str(), "josh.dntls"]));
 
         let response = send(
             state.clone(),
@@ -2488,6 +2503,22 @@ mod tests {
             .collect();
         fqdns.sort_unstable();
         assert_eq!(fqdns, ["fizz.josh.dntls", "josh.dntls"]);
+        let child_entry = names["names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["pubkey"] == child_hex)
+            .unwrap();
+        assert_eq!(child_entry["agent"], true);
+        assert_eq!(child_entry["owner"], "josh.dntls");
+        let parent_entry = names["names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["pubkey"] == parent_hex)
+            .unwrap();
+        assert_eq!(parent_entry["agent"], false);
+        assert!(parent_entry["owner"].is_null());
         let response = send(
             state.clone(),
             &host,
@@ -2529,6 +2560,7 @@ mod tests {
             .unwrap();
         assert_eq!(rebound.approved_by, row.approved_by);
         assert_eq!(rebound.approved_at, row.approved_at);
+        assert_eq!(rebound.admitted_via_parent, row.admitted_via_parent);
     }
 
     #[tokio::test]

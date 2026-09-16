@@ -197,11 +197,17 @@ pub async fn get_user_profile(
     )
     .await?;
 
-    Ok(events
+    let mut profile = events
         .first()
         .map(nostr_convert::profile_info_from_event)
         .transpose()?
-        .unwrap_or_else(|| empty_profile_info(&target)))
+        .unwrap_or_else(|| empty_profile_info(&target));
+    if let Some(names) = crate::relay::dntls_names::fetch(&state).await? {
+        if names.iter().any(|name| name.pubkey == target) {
+            profile.owner_pubkey = crate::relay::dntls_names::owners(&names).remove(&target);
+        }
+    }
+    Ok(profile)
 }
 
 #[tauri::command]
@@ -224,7 +230,29 @@ pub async fn get_users_batch(
     )
     .await?;
 
-    Ok(nostr_convert::users_batch_from_events(&events, &pubkeys))
+    let mut batch = nostr_convert::users_batch_from_events(&events, &pubkeys);
+    if let Some(names) = crate::relay::dntls_names::fetch(&state).await? {
+        let owners = crate::relay::dntls_names::owners(&names);
+        for name in names.iter().filter(|name| pubkeys.contains(&name.pubkey)) {
+            let profile = batch
+                .profiles
+                .entry(name.pubkey.clone())
+                .or_insert_with(|| crate::models::UserProfileSummaryInfo {
+                    display_name: None,
+                    name: None,
+                    avatar_url: None,
+                    nip05_handle: None,
+                    is_agent: false,
+                    owner_pubkey: None,
+                });
+            profile.is_agent = name.agent;
+            profile.owner_pubkey = owners.get(&name.pubkey).cloned();
+        }
+        batch
+            .missing
+            .retain(|pubkey| !batch.profiles.contains_key(pubkey));
+    }
+    Ok(batch)
 }
 
 #[tauri::command]
