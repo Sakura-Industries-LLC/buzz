@@ -97,6 +97,8 @@ jobs:
         run: cd desktop && pnpm exec playwright test --project=integration tests/e2e/dntls-onboarding-approval.spec.ts
       - name: Desktop dntls agent discovery e2e
         run: cd desktop && pnpm exec playwright test --project=smoke tests/e2e/mentions.spec.ts --grep 'DNTLS admission identifies'
+      - name: Inbox system event regression
+        run: cd desktop && pnpm exec playwright test --project=smoke tests/e2e/inbox-live-update.spec.ts --grep 'Inbox DM context excludes'
       - name: Upload desktop dntls e2e artifacts
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
