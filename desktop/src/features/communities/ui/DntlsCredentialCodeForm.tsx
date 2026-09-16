@@ -28,8 +28,11 @@ export const DNTLS_CODE_UNAVAILABLE_COPY =
 type FormProps = {
   initialNotice?: string | null;
   onCancel?: () => void;
-  onConnected: (name: string) => void;
+  onConnected?: (name: string) => void;
   onSkip?: () => void;
+  instruction?: string;
+  redeemCode?: (code: string) => Promise<void>;
+  onBusyChange?: (busy: boolean) => void;
 };
 
 const REDEEM_ERROR_COPY: Record<string, string> = {
@@ -43,6 +46,9 @@ export function DntlsCredentialCodeForm({
   onCancel,
   onConnected,
   onSkip,
+  instruction = DNTLS_CODE_INSTRUCTION,
+  redeemCode,
+  onBusyChange,
 }: FormProps) {
   const inputId = React.useId();
   const [code, setCode] = React.useState("");
@@ -67,20 +73,28 @@ export function DntlsCredentialCodeForm({
   async function handleConnect() {
     if (trimmed.length === 0 || busy) return;
     setBusy(true);
+    onBusyChange?.(true);
     setError(null);
     try {
-      const redeemed = await redeemDntlsCredentialCode(trimmed);
-      if (cancelledRef.current) return;
-      setConnectedName(redeemed.name);
+      if (redeemCode) {
+        await redeemCode(trimmed);
+      } else {
+        const redeemed = await redeemDntlsCredentialCode(trimmed);
+        if (cancelledRef.current) return;
+        setConnectedName(redeemed.name);
+      }
       setCode("");
     } catch (cause) {
       if (cancelledRef.current) return;
+      if (redeemCode) setCode("");
       setError(
         (isDntlsError(cause) && REDEEM_ERROR_COPY[cause.code]) ||
+          (redeemCode && cause instanceof Error && cause.message) ||
           DNTLS_CODE_UNAVAILABLE_COPY,
       );
     } finally {
       if (!cancelledRef.current) setBusy(false);
+      onBusyChange?.(false);
     }
   }
 
@@ -98,7 +112,7 @@ export function DntlsCredentialCodeForm({
           <Button
             className="w-fit rounded-full"
             data-testid="dntls-credential-code-continue"
-            onClick={() => onConnected(connectedName)}
+            onClick={() => onConnected?.(connectedName)}
             type="button"
           >
             Continue
@@ -113,9 +127,7 @@ export function DntlsCredentialCodeForm({
       className="flex w-full flex-col gap-4"
       data-testid="dntls-credential-code-form"
     >
-      <p className="text-sm leading-6 text-muted-foreground">
-        {DNTLS_CODE_INSTRUCTION}
-      </p>
+      <p className="text-sm leading-6 text-muted-foreground">{instruction}</p>
       <form
         className="flex w-full flex-col gap-3"
         onSubmit={(event) => {

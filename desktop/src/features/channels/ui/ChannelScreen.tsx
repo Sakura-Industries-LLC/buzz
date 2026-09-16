@@ -18,7 +18,6 @@ import {
 } from "@/features/channels/readState/readStateFormat";
 import { ChannelScreenEmptyState } from "@/features/channels/ui/ChannelScreenEmptyState";
 import { ChannelScreenHeader } from "@/features/channels/ui/ChannelScreenHeader";
-import { WelcomeAgentCreateDialog } from "@/features/channels/ui/WelcomeAgentCreateDialog";
 import { ForumChannelContent } from "@/features/channels/ui/ForumChannelContent";
 import { MembersSidebar } from "@/features/channels/ui/MembersSidebar";
 import {
@@ -28,10 +27,7 @@ import {
 } from "@/features/agents/hooks";
 import { mergeChannelKnownAgentPubkeys } from "@/features/agents/knownAgentPubkeys";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
-import { pickWelcomeGuideAgent } from "@/features/onboarding/welcomeGuide";
-import { useWelcomeKickoffEntrance } from "@/features/onboarding/useWelcomeKickoffEntrance";
-import { useWelcomeKickoffStagePresence } from "@/features/onboarding/useWelcomeKickoffStagePresence";
-import { useWelcomeAgentCreate } from "@/features/channels/useWelcomeAgentCreate";
+import { isWelcomeChannel, notifyWelcomeSurfaceReady } from "@/features/onboarding/welcome";
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
   useChannelMessagesQuery,
@@ -274,14 +270,6 @@ export function ChannelScreen({
     resolvedMessages,
   });
   const threadReplyEvents = threadRepliesQuery.data ?? EMPTY_RELAY_EVENTS;
-  const {
-    entranceMessageId: welcomeEntranceMessageId,
-    handleEntranceComplete: handleWelcomeEntranceComplete,
-  } = useWelcomeKickoffEntrance(
-    activeChannel,
-    resolvedMessages,
-    threadReplyEvents,
-  );
   const messageEventProfilePubkeys = useMessageEventProfilePubkeys(
     resolvedMessages,
     threadReplyEvents,
@@ -308,15 +296,6 @@ export function ChannelScreen({
   const channelMembers = channelMembersQuery.data;
   const managedAgentsQuery = useManagedAgentsQuery();
   const managedAgents = managedAgentsQuery.data ?? [];
-  const welcomeGuideAgent = React.useMemo(
-    () => pickWelcomeGuideAgent(managedAgents),
-    [managedAgents],
-  );
-  const welcomeAgentCreate = useWelcomeAgentCreate({
-    activeChannel,
-    currentIdentity,
-    welcomeGuideAgent,
-  });
   const relayAgentsQuery = useRelayAgentsQuery();
   const relayAgents = relayAgentsQuery.data ?? [];
   const knownAgentPubkeys = React.useMemo(
@@ -558,11 +537,7 @@ export function ChannelScreen({
     activeChannel && !activeChannel.archivedAt && activeChannel.isMember
       ? handleSendVideoReviewComment
       : undefined;
-  const handleOpenAddBot = React.useCallback(
-    (options?: { beforeSend?: () => void }) =>
-      welcomeAgentCreate.openAddAgent(() => setIsAddBotOpen(true), options),
-    [welcomeAgentCreate],
-  );
+  const handleOpenAddBot = React.useCallback(() => setIsAddBotOpen(true), []);
   const handleOpenMembersSidebar = () => setIsMembersSidebarOpen(true);
   const handleCloseChannelManagement = () => setChannelManagementOpen(false);
   const handleChannelManagementDeleted = React.useCallback(() => {
@@ -630,12 +605,11 @@ export function ChannelScreen({
         hasPersistedHydratedChannel(queryClient, activeChannelId),
     );
   settledChannelIdRef.current = settledChannelId;
-  const { welcomeKickoffStage, welcomeKickoffSettingUp } =
-    useWelcomeKickoffStagePresence(
-      activeChannel,
-      timelineMessages,
-      isTimelineLoading,
-    );
+  React.useEffect(() => {
+    if (activeChannel && isWelcomeChannel(activeChannel) && !isTimelineLoading) {
+      notifyWelcomeSurfaceReady(activeChannel.id);
+    }
+  }, [activeChannel, isTimelineLoading]);
   useChannelTargetReset({
     activeChannelId,
     setEditTargetId,
@@ -782,15 +756,6 @@ export function ChannelScreen({
   return (
     <AgentSessionProvider onOpenAgentSession={handleOpenAgentSession}>
       <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
-        <WelcomeAgentCreateDialog
-          guideName={welcomeGuideAgent?.name ?? "your welcome guide"}
-          isSending={welcomeAgentCreate.isSending}
-          onCreateInChat={() => void welcomeAgentCreate.createInChat()}
-          onCreateManually={welcomeAgentCreate.createManually}
-          onOpenChange={welcomeAgentCreate.setIsOpen}
-          open={welcomeAgentCreate.isOpen}
-          sendError={welcomeAgentCreate.error}
-        />
         <DeleteMessageConfirmDialog
           onConfirm={() => {
             if (emptyDeleteId) {
@@ -859,10 +824,6 @@ export function ChannelScreen({
                   onOpenMembers={handleOpenMembersSidebar}
                   isFetchingOlder={isFetchingOlder}
                   isHuddleTranscript={isHuddleTranscript}
-                  entranceMessageId={welcomeEntranceMessageId}
-                  onEntranceMessageComplete={handleWelcomeEntranceComplete}
-                  welcomeKickoffStage={welcomeKickoffStage}
-                  welcomeKickoffSettingUp={welcomeKickoffSettingUp}
                   editTarget={
                     editTargetMessage
                       ? buildMessageComposerEditTarget(

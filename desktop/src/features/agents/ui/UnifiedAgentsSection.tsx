@@ -17,6 +17,7 @@ import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { Badge } from "@/shared/ui/badge";
 import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
 import { AgentIdentityCard } from "./AgentIdentityCard";
+import { AgentDntlsIdentity } from "./AgentDntlsCredentials";
 import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
 import { PersonaActionsMenu } from "./PersonaActionsMenu";
@@ -252,7 +253,7 @@ function AgentPersonaCard({
   onStartAgent: (pubkey: string) => void;
   onStartPersona: (persona: AgentPersona) => void;
 }) {
-  const title = persona.displayName;
+  const title = agent?.dntlsName ?? persona.displayName;
   const modelLabel = resolveAgentCardModelLabel({
     agent,
     personaModel: persona.model,
@@ -326,12 +327,15 @@ function AgentPersonaCard({
         onOpenPersonaProfile(persona);
       }}
       statusBadge={
-        agent?.personaOrphaned ? (
-          <Badge className="gap-1" variant="warning">
-            <AlertTriangle className="h-3 w-3" />
-            Configuration missing
-          </Badge>
-        ) : null
+        <>
+          {agent ? <AgentDntlsIdentity agent={agent} /> : null}
+          {agent?.personaOrphaned ? (
+            <Badge className="gap-1" variant="warning">
+              <AlertTriangle className="h-3 w-3" />
+              Configuration missing
+            </Badge>
+          ) : null}
+        </>
       }
     />
   );
@@ -407,12 +411,15 @@ function StandaloneAgentCard({
         );
       }}
       statusBadge={
-        agent.personaOrphaned ? (
-          <Badge className="gap-1" variant="warning">
-            <AlertTriangle className="h-3 w-3" />
-            Configuration missing
-          </Badge>
-        ) : null
+        <>
+          <AgentDntlsIdentity agent={agent} />
+          {agent.personaOrphaned ? (
+            <Badge className="gap-1" variant="warning">
+              <AlertTriangle className="h-3 w-3" />
+              Configuration missing
+            </Badge>
+          ) : null}
+        </>
       }
     />
   );

@@ -458,6 +458,14 @@ pub async fn confirm_agent_snapshot_import(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AgentSnapshotImportResult, String> {
+    if crate::relay::dntls_community_for_transport(
+        &state,
+        &crate::relay::relay_ws_url_with_override(&state),
+    )
+    .is_some()
+    {
+        return Err("Snapshot imports do not include DNTLS credentials. Create an agent from a template and connect its own name.".into());
+    }
     // ── Phase 1: validate (no writes) ────────────────────────────────────────
     // Locked cards unlock only via this machine's exact key endpoints;
     // anything else fails closed here, before key generation.

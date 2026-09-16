@@ -2,10 +2,6 @@ import * as React from "react";
 import { useQueryClient, type QueryStatus } from "@tanstack/react-query";
 import { toast } from "sonner";
 
-import {
-  managedAgentsQueryKey,
-  relayAgentsQueryKey,
-} from "@/features/agents/hooks";
 import { channelsQueryKey } from "@/features/channels/hooks";
 import {
   ensureStarterChannels,
@@ -17,7 +13,6 @@ import {
 } from "@/features/onboarding/welcome";
 import { forceFreshOnboarding } from "@/features/onboarding/devFreshOnboarding";
 import { ensureWelcomeCanvas } from "@/features/onboarding/welcomeCanvas";
-import { ensureWelcomeTeam } from "@/features/onboarding/welcomeGuide";
 import { useProfileQuery } from "@/features/profile/hooks";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -45,7 +40,6 @@ export type ChannelInitResult =
 const welcomeSeedPromises = new Map<string, Promise<void>>();
 
 function seedWelcomeExperience(
-  queryClient: ReturnType<typeof useQueryClient>,
   channelId: string,
   pubkey: string | null,
   communityScope: string | null,
@@ -56,12 +50,7 @@ function seedWelcomeExperience(
 
   const promise = (async () => {
     try {
-      await ensureWelcomeTeam(channelId, communityScope);
       await ensureWelcomeCanvas(channelId);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
-        queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
-      ]);
       markWelcomeChannelEnsured(pubkey, communityScope);
     } catch (error) {
       console.warn("Failed to seed the private Welcome experience.", error);
@@ -128,12 +117,7 @@ export async function initializeStarterChannels(
         ...channels.filter((channel) => !ensuredIds.has(channel.id)),
       ];
     });
-    void seedWelcomeExperience(
-      queryClient,
-      welcomeChannel.id,
-      pubkey,
-      communityScope,
-    );
+    void seedWelcomeExperience(welcomeChannel.id, pubkey, communityScope);
     await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
     if (focus) {
       // Refreshing can briefly replace the optimistic cache with an older relay
@@ -469,7 +453,8 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
   const identityQuery = useIdentityQuery();
   const identity = identityQuery.data;
   const currentPubkey = identity?.pubkey ?? null;
-  const starterChannelsCommunityScope = activeCommunity?.relayUrl ?? null;
+  const starterChannelsCommunityScope =
+    activeCommunity?.dntlsName ?? activeCommunity?.relayUrl ?? null;
   const starterChannelsInitPromisesRef = React.useRef(
     new Map<string, Promise<ChannelInitResult>>(),
   );

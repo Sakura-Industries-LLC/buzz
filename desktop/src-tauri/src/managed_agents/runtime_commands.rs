@@ -478,6 +478,12 @@ pub async fn reconcile_managed_agent_runtimes(
         // `effective_agent_relay_url`. Every local auto-start agent fans out
         // to every configured community.
         {
+            let state = app.state::<AppState>();
+            if crate::relay::dntls_community_for_transport(&state, &community.relay_url).is_some()
+                && crate::dntls_credentials::agent_name(&app, &record.pubkey).is_none()
+            {
+                continue;
+            }
             jobs.push((record.clone(), community.relay_url.clone()));
         }
     }

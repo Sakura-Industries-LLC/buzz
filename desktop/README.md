@@ -20,6 +20,34 @@ invitation or key-recovery hints.
 Pending approval responses during profile lookup, publishing, or other
 onboarding requests return to the same waiting screen.
 
+Welcome creates a private channel and its canvas, not agent instances. The
+Fizz, Honey, Pollen, and Welcome Team templates remain available for manual use.
+
+## Connecting an agent's DNTLS name
+
+1. In the Portal, open your name and create a subname for the agent.
+2. Open that subname's **EXPORT → Export one-time code** action.
+3. In Buzz, create an agent or add an agent template to a channel.
+4. Paste the subname's code when prompted. Do not use your own name's code.
+
+Each agent needs a different subname beneath your connected name. Its card
+shows the full DNTLS name and a **Replace…** action for a new code. Cancelling
+the prompt or submitting an invalid, expired, or used code creates no instance.
+
+Buzz stores each agent's credentials separately under
+`<app-data>/dntls/agents/<agent-public-key>/credentials.bundle`, using atomic
+writes and mode `0600` on Unix. Its connection never uses your credentials.
+Removing the agent stops its connection and deletes its local bundle.
+
+Older agents without credentials do not start automatically in a DNTLS
+community. Use **Connect a name** on their cards. Stale credentials refresh
+through the Portal; if authorization has expired, export a new code and use
+**Replace…**.
+
+DNTLS agents run on this computer. Snapshot imports cannot supply each
+agent's credentials; create agents from templates and connect their names
+instead. Agent creation in non-DNTLS communities is unchanged.
+
 ## Scripts
 
 - `pnpm dev` - run the web frontend

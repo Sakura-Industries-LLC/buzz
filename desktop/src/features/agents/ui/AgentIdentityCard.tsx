@@ -33,7 +33,7 @@ export function AgentIdentityCard({
   return (
     <div
       className={cn(
-        "group relative aspect-[4/5] w-full min-w-0 overflow-hidden rounded-2xl border border-border/70 bg-muted/50 text-left shadow-xs transition-colors hover:border-border hover:bg-muted/65",
+        "group relative flex aspect-[4/5] min-h-max w-full min-w-0 flex-col overflow-hidden rounded-2xl border border-border/70 bg-muted/50 text-left shadow-xs transition-colors hover:border-border hover:bg-muted/65",
       )}
       data-testid={dataTestId}
     >
@@ -44,7 +44,7 @@ export function AgentIdentityCard({
         type="button"
       />
 
-      <div className="pointer-events-none relative z-20 flex h-full w-full min-w-0 flex-col items-center justify-center gap-5 px-4 pb-12 text-center">
+      <div className="pointer-events-none relative z-20 flex min-h-40 w-full min-w-0 flex-1 flex-col items-center justify-center gap-5 px-4 py-8 text-center">
         <div className="flex h-24 w-24 items-center justify-center">
           {avatar ??
             (trimmedAvatarUrl ? (
@@ -68,7 +68,7 @@ export function AgentIdentityCard({
         <div className="absolute top-3 right-3 z-40">{actions}</div>
       ) : null}
 
-      <div className="pointer-events-none absolute right-3 bottom-3 left-3 z-30 flex min-w-0 flex-col gap-0.5 text-left text-sm leading-5">
+      <div className="pointer-events-none relative z-30 flex min-w-0 shrink-0 flex-col gap-0.5 px-3 pb-3 text-left text-sm leading-5">
         <span className="min-w-0 truncate font-semibold text-foreground tracking-normal">
           {label}
         </span>

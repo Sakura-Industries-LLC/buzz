@@ -110,6 +110,57 @@ pub(crate) fn workspace_canonical_host(state: &AppState) -> Option<String> {
         .and_then(|guard| guard.clone())
 }
 
+/// Resolves a DNTLS community from a stable name or an owned listener.
+pub(crate) fn dntls_community_for_transport(state: &AppState, transport: &str) -> Option<String> {
+    use tauri::Manager;
+    let url = url::Url::parse(transport).ok()?;
+    if let Some(host) = url.host_str().filter(|host| host.ends_with(".dntls")) {
+        return Some(host.to_string());
+    }
+    if let Some(app) = state.app_handle.lock().ok()?.as_ref() {
+        if let Some(name) = app
+            .state::<crate::dntls_connector::DntlsConnectors>()
+            .community_for_url(transport)
+        {
+            return Some(name);
+        }
+    }
+    let active = url::Url::parse(&relay_ws_url_with_override(state)).ok()?;
+    if url.host_str() == active.host_str() && url.port() == active.port() {
+        workspace_canonical_host(state)
+    } else {
+        None
+    }
+}
+
+/// Never authenticates an agent through the installation owner's credentials.
+pub(crate) fn agent_transport(
+    state: &AppState,
+    pubkey: &str,
+    transport: &str,
+) -> Result<String, String> {
+    let Some(community) = dntls_community_for_transport(state, transport) else {
+        return Ok(transport.to_string());
+    };
+    let app = state
+        .app_handle
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .ok_or("Desktop identity state is unavailable")?;
+    let ready = crate::dntls_connector::connector_for_agent(&app, &community, pubkey)?;
+    Ok(ready.relay_url)
+}
+
+fn transport_for_signer(state: &AppState, keys: &Keys, transport: &str) -> Result<String, String> {
+    let owner = state.keys.lock().map_err(|e| e.to_string())?.public_key();
+    if owner == keys.public_key() {
+        Ok(transport.to_string())
+    } else {
+        agent_transport(state, &keys.public_key().to_hex(), transport)
+    }
+}
+
 /// ASCII-lowercase DNTLS community host, or `None` when empty.
 pub fn canonical_dntls_host(dntls_name: &str) -> Option<String> {
     let host = dntls_name.trim().trim_end_matches('.').to_ascii_lowercase();
@@ -153,7 +204,10 @@ pub fn rewrite_url_for_auth(transport_url: &str, canonical_host: Option<&str>) -
 
 /// Sign-tag URL for `transport_url` under the active workspace's DNTLS host.
 pub fn auth_url_for_transport(state: &AppState, transport_url: &str) -> String {
-    rewrite_url_for_auth(transport_url, workspace_canonical_host(state).as_deref())
+    rewrite_url_for_auth(
+        transport_url,
+        dntls_community_for_transport(state, transport_url).as_deref(),
+    )
 }
 
 /// Canonical origin env for a managed-agent child (`BUZZ_RELAY_AUTH_URL`).
@@ -490,6 +544,13 @@ pub async fn query_relay_at_with_keys(
     auth_tag: Option<&str>,
 ) -> Result<Vec<nostr::Event>, String> {
     crate::relay_admission::wait_for_rate_limit().await;
+    let transport = transport_for_signer(state, keys, api_base_url)?;
+    let api_base_url = relay_http_base_url(&transport);
+    let auth_tag = if dntls_community_for_transport(state, &transport).is_some() {
+        None
+    } else {
+        auth_tag
+    };
     let url = format!("{}/query", api_base_url);
     let body_bytes =
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
@@ -620,13 +681,19 @@ pub async fn sync_managed_agent_profile(
     auth_tag: Option<&str>, // NIP-OA auth tag JSON
 ) -> Result<(), String> {
     crate::relay_admission::wait_for_rate_limit().await;
+    let relay_url = agent_transport(state, &agent_keys.public_key().to_hex(), relay_url)?;
+    let auth_tag = if dntls_community_for_transport(state, &relay_url).is_some() {
+        None
+    } else {
+        auth_tag
+    };
     // Build a signed kind:0 profile event (with optional NIP-OA auth tag).
     let event = build_profile_event(agent_keys, display_name, avatar_url, auth_tag)?;
     let event_json = event.as_json();
     let body_bytes = event_json.into_bytes();
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "agent profile sync")?;
 
-    let url = format!("{}/events", relay_http_base_url(relay_url));
+    let url = format!("{}/events", relay_http_base_url(&relay_url));
     let auth = build_nip98_auth_header_for_keys(
         agent_keys,
         &Method::POST,
@@ -748,7 +815,13 @@ pub async fn submit_signed_event_with_keys(
         return Err("signed event does not match the publishing identity".to_string());
     }
     crate::relay_admission::wait_for_rate_limit().await;
-    let url = format!("{}/events", relay_api_base_url_with_override(state));
+    let transport = transport_for_signer(state, keys, &relay_api_base_url_with_override(state))?;
+    let auth_tag = if dntls_community_for_transport(state, &transport).is_some() {
+        None
+    } else {
+        auth_tag
+    };
+    let url = format!("{}/events", relay_http_base_url(&transport));
     let body_bytes = event.as_json().into_bytes();
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "signed event submit (keys)")?;
     let auth_header = build_nip98_auth_header_for_keys(

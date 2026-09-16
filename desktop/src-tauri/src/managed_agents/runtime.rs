@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use tauri::Manager;
 
 use tauri::AppHandle;
 
@@ -301,6 +302,11 @@ pub fn build_managed_agent_summary(
     Ok(ManagedAgentSummary {
         pubkey: record.pubkey.clone(),
         name: record.name.clone(),
+        dntls_name: crate::dntls_credentials::agent_name(app, &record.pubkey),
+        dntls_community: crate::relay::dntls_community_for_transport(
+            &app.state::<crate::app_state::AppState>(),
+            &crate::relay::relay_ws_url_with_override(&app.state::<crate::app_state::AppState>()),
+        ),
         persona_id: record.persona_id.clone(),
         runtime: record.runtime.clone(),
         team_id: record.team_id.clone(),
@@ -500,7 +506,11 @@ pub fn spawn_agent_child(
 
     // The caller supplies the explicit canonical pair relay. This is the only
     // relay this child may connect to, regardless of the record/workspace default.
-    let effective_relay_url = runtime_key.relay_url.clone();
+    let effective_relay_url = crate::relay::agent_transport(
+        &app.state::<crate::app_state::AppState>(),
+        &record.pubkey,
+        &runtime_key.relay_url,
+    )?;
 
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink
@@ -537,7 +547,7 @@ pub fn spawn_agent_child(
         let state = app.state::<crate::app_state::AppState>();
         if let Some(auth_url) = crate::relay::managed_agent_auth_url_env(
             &effective_relay_url,
-            crate::relay::workspace_canonical_host(&state).as_deref(),
+            crate::relay::dntls_community_for_transport(&state, &effective_relay_url).as_deref(),
         ) {
             command.env("BUZZ_RELAY_AUTH_URL", auth_url);
         } else {
@@ -770,7 +780,13 @@ pub fn spawn_agent_child(
     command.env_remove("BUZZ_ACP_API_TOKEN");
     command.env_remove("BUZZ_API_TOKEN");
 
-    if let Some(ref auth_tag) = record.auth_tag {
+    if let Some(auth_tag) = record.auth_tag.as_ref().filter(|_| {
+        crate::relay::dntls_community_for_transport(
+            &app.state::<crate::app_state::AppState>(),
+            &effective_relay_url,
+        )
+        .is_none()
+    }) {
         command.env("BUZZ_AUTH_TAG", auth_tag);
     } else {
         command.env_remove("BUZZ_AUTH_TAG");
@@ -863,11 +879,13 @@ pub fn spawn_agent_child(
     // `Command` above, BEFORE spawning. Re-resolving after `spawn()` would let
     // a persona/harness/global edit landing in between stamp the NEW config
     // onto a child running the OLD one, silently suppressing the badge.
+    // Compare the logical relay scope, not the bundle-specific loopback
+    // listener; a separate agent listener is not a configuration change.
     let spawn_config = super::spawn_snapshot::SpawnConfigSnapshot::from_inputs(
         super::spawn_snapshot::SpawnConfigInputs {
             record,
             descriptor: &descriptor,
-            relay_url: &effective_relay_url,
+            relay_url: &runtime_key.relay_url,
             team_instructions: team_instructions.as_deref(),
             system_prompt: effective_prompt.as_deref(),
             model: effective_model.as_deref(),

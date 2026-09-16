@@ -46,12 +46,6 @@ import { useCardMintJobs } from "@/features/agents/cardMintStore";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
 import { ChannelComposerActivityAccessory } from "@/features/channels/ui/ChannelComposerActivityAccessory";
 import {
-  containsWelcomePersonaMention,
-  WelcomeComposerGuidanceLayer,
-} from "@/features/channels/ui/WelcomeComposerBanner";
-import { useWelcomeComposerBanner } from "@/features/channels/ui/useWelcomeComposerBanner";
-import {
-  mentionsKnownAgent,
   selectThreadComposerBotTypingPubkeys,
   shouldPrioritizeIdleAuxiliary,
   shouldUseFocusIdleDrawer,
@@ -67,7 +61,6 @@ import { useChannelPaneMessages } from "@/features/channels/ui/useChannelPaneMes
 import { useRoutedMessageEdit } from "@/features/channels/ui/useRoutedMessageEdit";
 import { Button } from "@/shared/ui/button";
 import { useRenderScopedReactionHydration } from "@/features/messages/lib/useRenderScopedReactionHydration";
-import { isWelcomeExperienceChannel as isWelcomeExperience } from "@/features/onboarding/welcome";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
@@ -109,8 +102,6 @@ export const ChannelPane = React.memo(function ChannelPane({
   onRetryTimeline,
   entranceMessageId = null,
   onEntranceMessageComplete,
-  welcomeKickoffStage = null,
-  welcomeKickoffSettingUp = false,
   messages,
   threadSummaries,
   huddleThreadRepliesError = false,
@@ -230,23 +221,12 @@ export const ChannelPane = React.memo(function ChannelPane({
   );
   const huddleMemberPubkeysPending =
     agentPubkeysPending && hasOtherDmParticipant(activeChannel, currentPubkey);
-  const isActiveWelcomeChannel =
-    activeChannel !== null && isWelcomeExperience(activeChannel);
   useComposerHeightPadding(
     timelineScrollRef,
     composerWrapperRef,
     `${activeChannelId}:${isSinglePanelView}:${hasMainComposerOverlay}`,
     "css-variable",
     () => messageTimelineRef.current?.settleAtBottom() ?? false,
-  );
-  const {
-    bannerState: welcomeComposerBannerState,
-    completeBanner: completeWelcomeComposerBanner,
-    dismissBanner: handleDismissWelcomeBanner,
-  } = useWelcomeComposerBanner(
-    activeChannelId,
-    isActiveWelcomeChannel,
-    currentPubkey ?? null,
   );
   const isEditInThread = editTarget?.isThreadReply === true;
   const mainEditTarget = editTarget && !isEditInThread ? editTarget : null;
@@ -265,19 +245,6 @@ export const ChannelPane = React.memo(function ChannelPane({
     timeoutState.active ||
     isModerationDmChannel ||
     isSending;
-  const knownAgentPubkeys = React.useMemo(() => {
-    const pubkeys = new Set<string>();
-    for (const pubkey of agentPubkeys ?? []) {
-      pubkeys.add(pubkey.toLowerCase());
-    }
-    for (const agent of agentSessionAgents) {
-      pubkeys.add(agent.pubkey.toLowerCase());
-    }
-    for (const agent of activityAgents) {
-      pubkeys.add(agent.pubkey.toLowerCase());
-    }
-    return pubkeys;
-  }, [activityAgents, agentPubkeys, agentSessionAgents]);
   const handleSendMessage = React.useCallback(
     async (
       content: string,
@@ -290,10 +257,6 @@ export const ChannelPane = React.memo(function ChannelPane({
       } | null,
       forceRest?: boolean,
     ) => {
-      const shouldCompleteWelcomeBanner =
-        isActiveWelcomeChannel &&
-        (containsWelcomePersonaMention(content) ||
-          mentionsKnownAgent(mentionPubkeys, knownAgentPubkeys));
       messageTimelineRef.current?.scrollToBottomOnNextUpdate();
       await onSendMessage(
         content,
@@ -311,18 +274,8 @@ export const ChannelPane = React.memo(function ChannelPane({
       ) {
         await goChannel(channelId, { replace: true });
       }
-      if (shouldCompleteWelcomeBanner) {
-        completeWelcomeComposerBanner();
-      }
     },
-    [
-      activeChannelId,
-      completeWelcomeComposerBanner,
-      goChannel,
-      isActiveWelcomeChannel,
-      knownAgentPubkeys,
-      onSendMessage,
-    ],
+    [activeChannelId, goChannel, onSendMessage],
   );
   const canDropInMainColumn =
     hasMainComposerOverlay &&
@@ -735,15 +688,6 @@ export const ChannelPane = React.memo(function ChannelPane({
                     hasComposerBottomActivity && "composer-dock--with-activity",
                   )}
                 >
-                  {isActiveWelcomeChannel && !timeoutState.active ? (
-                    <WelcomeComposerGuidanceLayer
-                      onDismiss={handleDismissWelcomeBanner}
-                      settingUp={welcomeKickoffSettingUp}
-                      state={welcomeComposerBannerState}
-                    >
-                      {welcomeKickoffStage}
-                    </WelcomeComposerGuidanceLayer>
-                  ) : null}
                   {timeoutState.active ? (
                     <ComposerTimeoutBanner
                       expiresAtMs={timeoutState.expiresAtMs}

@@ -1,5 +1,5 @@
 use nostr::{Keys, ToBech32};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use super::managed_agent_definition::validate_create_definition;
 
@@ -382,7 +382,31 @@ pub async fn create_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CreateManagedAgentResponse, String> {
-    let name = input.name.trim().to_string();
+    let connectors = app.state::<crate::dntls_connector::DntlsConnectors>();
+    let _identity_guard = connectors.agent_identity_operation.lock().await;
+    let mut name = input.name.trim().to_string();
+    let active_relay = relay_ws_url_with_override(&state);
+    let community = crate::relay::dntls_community_for_transport(&state, &active_relay);
+    if input
+        .dntls_community
+        .as_deref()
+        .is_some_and(|name| Some(name) != community.as_deref())
+    {
+        return Err("The active community changed. Start creating the agent again.".into());
+    }
+    if community.is_some()
+        && input
+            .dntls_credential_code
+            .as_deref()
+            .is_none_or(|code| code.trim().is_empty())
+    {
+        return Err("Connect the agent's DNTLS name with a one-time code.".into());
+    }
+    if community.is_some() && input.backend != BackendKind::Local {
+        return Err(
+            "DNTLS agents run locally so Buzz can provide their private connection.".into(),
+        );
+    }
     let requested_persona_id = input
         .persona_id
         .as_deref()
@@ -415,7 +439,7 @@ pub async fn create_managed_agent(
     }
 
     // ── Phase 1: generate keys (sync lock) ────────────────────────────────────
-    let (agent_keys, private_key_nsec, pubkey, resolved_relay_url, input) = {
+    let (agent_keys, private_key_nsec, pubkey, mut resolved_relay_url, mut input) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -470,10 +494,36 @@ pub async fn create_managed_agent(
 
     let relay_mesh = normalize_relay_mesh(input.relay_mesh.as_ref(), &input.backend)?;
 
+    let mut pending_credentials = None;
+    if let Some(community) = &community {
+        let code = input
+            .dntls_credential_code
+            .take()
+            .ok_or("A one-time code is required.")?;
+        name = crate::dntls_credentials::redeem_agent_credentials(&app, &pubkey, code)
+            .await
+            .map_err(|e| e.message)?;
+        pending_credentials = Some(PendingAgentCredentials {
+            app: app.clone(),
+            path: crate::dntls_credentials::agent_credentials_bundle_path(&app, &pubkey)?,
+            committed: false,
+        });
+        resolved_relay_url = format!("wss://{community}");
+    }
+    if community
+        != crate::relay::dntls_community_for_transport(&state, &relay_ws_url_with_override(&state))
+    {
+        return Err(
+            "The active community changed. Create the agent in the selected community.".into(),
+        );
+    }
+
     // ── Phase 2: compute NIP-OA auth tag (sync) ──────────────────────────────
     // Agents authenticate via the auth tag in their kind:0 profile event.
     // No tokens are minted. Fail closed: bad auth tag → don't create agent.
-    let auth_tag = {
+    let auth_tag = if community.is_some() {
+        None
+    } else {
         let owner_keys = state.signing_keys()?;
         // Bridge nostr 0.37 → 0.36 (buzz-sdk) via hex round-trip.
         let compat_owner = nostr::Keys::parse(&owner_keys.secret_key().to_secret_hex())
@@ -730,6 +780,9 @@ pub async fn create_managed_agent(
         records.push(record);
 
         save_managed_agents(&app, &records)?;
+        if let Some(pending) = pending_credentials.as_mut() {
+            pending.committed = true;
+        }
 
         let record = records
             .iter()
@@ -781,10 +834,14 @@ pub async fn create_managed_agent(
     // ── Phase 4: sync agent profile on relay (async, outside lock) ───────────
     // Use the avatar persisted on the record so the published profile and any
     // later reconciliation agree on the same value.
-    let profile_relay_url = crate::relay::effective_agent_relay_url(
-        &resolved_relay_url,
-        &relay_ws_url_with_override(&state),
-    );
+    let profile_relay_url = if community.is_some() {
+        resolved_relay_url.clone()
+    } else {
+        crate::relay::effective_agent_relay_url(
+            &resolved_relay_url,
+            &relay_ws_url_with_override(&state),
+        )
+    };
     let mut profile_sync_error = (sync_managed_agent_profile(
         &state,
         &profile_relay_url,
@@ -1095,6 +1152,9 @@ pub async fn delete_managed_agent(
     app: AppHandle,
 ) -> Result<(), String> {
     use tauri::Manager;
+    let credentials_app = app.clone();
+    let connectors = credentials_app.state::<crate::dntls_connector::DntlsConnectors>();
+    let _identity_guard = connectors.agent_identity_operation.lock().await;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
         {
@@ -1139,6 +1199,9 @@ pub async fn delete_managed_agent(
             if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) {
                 stop_managed_agent_process(&app, record, &mut runtimes)?;
             }
+            tauri::async_runtime::block_on(crate::dntls_credentials::remove_agent_credentials(
+                &app, &pubkey,
+            ))?;
             state.clear_agent_session_caches(&pubkey);
             let initial_len = records.len();
             records.retain(|record| record.pubkey != pubkey);
@@ -1159,6 +1222,123 @@ pub async fn delete_managed_agent(
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+/// Deletes staged credentials if agent creation fails before its record is saved.
+struct PendingAgentCredentials {
+    app: AppHandle,
+    path: std::path::PathBuf,
+    committed: bool,
+}
+
+impl Drop for PendingAgentCredentials {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        use tauri::Manager;
+        let _ = std::fs::remove_file(&self.path);
+        let _ = self
+            .app
+            .state::<crate::dntls_connector::DntlsConnectors>()
+            .remove_bundle(&self.path);
+    }
+}
+
+#[tauri::command]
+pub async fn replace_managed_agent_dntls_credentials(
+    pubkey: String,
+    code: String,
+    community: String,
+    app: AppHandle,
+) -> Result<ManagedAgentSummary, String> {
+    use tauri::Manager;
+    let state = app.state::<AppState>();
+    let connectors = app.state::<crate::dntls_connector::DntlsConnectors>();
+    let _identity_guard = connectors.agent_identity_operation.lock().await;
+    let active_relay = relay_ws_url_with_override(&state);
+    let community = crate::dntls_connector::normalize_dntls_name(&community)?;
+    if crate::relay::dntls_community_for_transport(&state, &active_relay).as_deref()
+        != Some(&community)
+    {
+        return Err("Select the agent's DNTLS community before connecting its name.".into());
+    }
+    {
+        let _guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let records = load_managed_agents(&app)?;
+        let record = records
+            .iter()
+            .find(|r| r.pubkey == pubkey)
+            .ok_or("Agent not found.")?;
+        if record.backend != BackendKind::Local {
+            return Err(
+                "DNTLS agents run locally so Buzz can provide their private connection.".into(),
+            );
+        }
+    }
+    let name = crate::dntls_credentials::redeem_agent_credentials(&app, &pubkey, code)
+        .await
+        .map_err(|e| e.message)?;
+    {
+        let _guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let mut records = load_managed_agents(&app)?;
+        let record = find_managed_agent_mut(&mut records, &pubkey)?;
+        let mut runtimes = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|e| e.to_string())?;
+        stop_managed_agent_process(&app, record, &mut runtimes)?;
+        record.name = name;
+        record.display_name = None;
+        record.auth_tag = None;
+        record.relay_url = format!("wss://{community}");
+        record.last_error = None;
+        record.updated_at = now_iso();
+        save_managed_agents(&app, &records)?;
+    }
+    let started =
+        start_local_agent_with_preflight(&app, &state, &pubkey, false, Some(&active_relay), None)
+            .await;
+    let record = load_managed_agents(&app)?
+        .into_iter()
+        .find(|r| r.pubkey == pubkey)
+        .ok_or("Agent not found.")?;
+    let keys = Keys::parse(&record.private_key_nsec).map_err(|e| e.to_string())?;
+    let profile_error = sync_managed_agent_profile(
+        &state,
+        &record.relay_url,
+        &keys,
+        &record.name,
+        record.avatar_url.as_deref(),
+        None,
+    )
+    .await
+    .err();
+    if let Some(error) = started.err().or(profile_error) {
+        let _guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let mut records = load_managed_agents(&app)?;
+        find_managed_agent_mut(&mut records, &pubkey)?.last_error = Some(error);
+        save_managed_agents(&app, &records)?;
+    }
+    let records = load_managed_agents(&app)?;
+    let record = records
+        .iter()
+        .find(|r| r.pubkey == pubkey)
+        .ok_or("Agent not found.")?;
+    let runtimes = state
+        .managed_agent_processes
+        .lock()
+        .map_err(|e| e.to_string())?;
+    summarize_from_disk(&app, record, &runtimes)
 }
 
 // Remote agent shutdown is handled entirely by the frontend:

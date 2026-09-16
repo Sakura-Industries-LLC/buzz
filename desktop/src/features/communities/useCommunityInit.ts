@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { isMacPlatform } from "@/shared/lib/platform";
+import { startDntlsConnector } from "./dntlsConnector";
 
 import { relayClient } from "@/shared/api/relayClient";
 import { resetRateLimitGate } from "@/shared/api/relayRateLimitGate";
@@ -227,6 +228,28 @@ export function useCommunityInit(
         needsSetup: false,
         appliedKey: communityKey,
       });
+
+      if (activeCommunity.dntlsName) {
+        try {
+          const ready = await startDntlsConnector(activeCommunity.dntlsName);
+          // The provider replaces persisted loopback ports after restoration.
+          // Applying the old port first would auto-start a second agent pair.
+          if (cancelled || ready.relayUrl !== activeCommunity.relayUrl) return;
+        } catch (error) {
+          if (!cancelled) {
+            setResult({
+              isReady: false,
+              needsSetup: false,
+              appliedKey: null,
+              error:
+                error instanceof Error
+                  ? error.message
+                  : "Could not connect to the DNTLS community",
+            });
+          }
+          return;
+        }
+      }
 
       // Resolve the active signer before resetting singletons so
       // identity-scoped state is discarded when the pubkey changed, not only

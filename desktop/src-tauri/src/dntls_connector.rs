@@ -15,6 +15,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -44,13 +45,15 @@ struct RunningConnector {
     task: tauri::async_runtime::JoinHandle<()>,
 }
 
-/// Desktop-owned connectors keyed by normalized DNTLS community name.
+/// Desktop-owned connectors keyed by community and credential bundle.
 #[derive(Default)]
 pub(crate) struct DntlsConnectors {
     /// Shared connector table.
-    running: Arc<Mutex<HashMap<String, RunningConnector>>>,
+    running: Arc<Mutex<HashMap<(String, PathBuf), RunningConnector>>>,
     /// Serializes identity changes with connector startup and credential refresh.
     pub(crate) operation: tokio::sync::Mutex<()>,
+    /// Serializes managed-agent create, replace and remove across Portal requests.
+    pub(crate) agent_identity_operation: tokio::sync::Mutex<()>,
 }
 
 impl DntlsConnectors {
@@ -65,6 +68,33 @@ impl DntlsConnectors {
         }
         running.clear();
     }
+
+    /// Retires only listeners and streams presenting this bundle.
+    pub(crate) fn remove_bundle(&self, bundle: &Path) -> Result<(), String> {
+        let mut running = self
+            .running
+            .lock()
+            .map_err(|_| "DNTLS connector state is unavailable")?;
+        running.retain(|(_, path), connector| {
+            if path == bundle {
+                connector.task.abort();
+                false
+            } else {
+                true
+            }
+        });
+        Ok(())
+    }
+
+    /// Resolves a transport URL without depending on the currently selected community.
+    pub(crate) fn community_for_url(&self, relay_url: &str) -> Option<String> {
+        let target = Url::parse(relay_url).ok()?;
+        self.running.lock().ok()?.values().find_map(|connector| {
+            let local = Url::parse(&connector.ready.relay_url).ok()?;
+            (local.host_str() == target.host_str() && local.port() == target.port())
+                .then(|| connector.ready.community.clone())
+        })
+    }
 }
 
 impl Drop for DntlsConnectors {
@@ -78,9 +108,9 @@ impl Drop for DntlsConnectors {
 #[serde(rename_all = "snake_case")]
 pub(crate) struct ConnectorReady {
     /// Normalized DNTLS community authority.
-    community: String,
+    pub(crate) community: String,
     /// Loopback WebSocket URL used by the existing Buzz client.
-    relay_url: String,
+    pub(crate) relay_url: String,
 }
 
 /// Verified dial target for one community: the endpoint whose DNTLS identity
@@ -102,10 +132,13 @@ pub(crate) async fn start_dntls_connector(
 ) -> Result<ConnectorReady, DntlsError> {
     let community = normalize_dntls_name(&community)?;
     let _guard = state.operation.lock().await;
-    if let Some(ready) = lookup(&state.running, &community)? {
+    let bundle = credentials_bundle_path(&app)?;
+    let data_dir = credentials_data_dir(&app)?;
+    let key = (community.clone(), bundle.clone());
+    if let Some(ready) = lookup(&state.running, &key)? {
         return Ok(ready);
     }
-    let verified = discover_with_refresh(&app, &community).await?;
+    let verified = discover_with_refresh(&bundle, data_dir.clone(), &community).await?;
     let listener = TcpListener::bind((IpAddr::from([127, 0, 0, 1]), 0))
         .await
         .map_err(|error| format!("could not open the DNTLS loopback listener: {error}"))?;
@@ -124,9 +157,16 @@ pub(crate) async fn start_dntls_connector(
         .running
         .lock()
         .map_err(|_| "DNTLS connector state is unavailable".to_string())?;
-    let task = tauri::async_runtime::spawn(accept_loop(app, listener, community.clone(), verified));
+    let task = tauri::async_runtime::spawn(accept_loop(
+        app,
+        listener,
+        community.clone(),
+        bundle,
+        data_dir,
+        Some(verified),
+    ));
     running.insert(
-        community,
+        key,
         RunningConnector {
             ready: ready.clone(),
             task,
@@ -136,27 +176,29 @@ pub(crate) async fn start_dntls_connector(
 }
 
 fn lookup(
-    running: &Mutex<HashMap<String, RunningConnector>>,
-    community: &str,
+    running: &Mutex<HashMap<(String, PathBuf), RunningConnector>>,
+    key: &(String, PathBuf),
 ) -> Result<Option<ConnectorReady>, String> {
     let running = running
         .lock()
         .map_err(|_| "DNTLS connector state is unavailable".to_string())?;
-    Ok(running.get(community).map(|c| c.ready.clone()))
+    Ok(running.get(key).map(|c| c.ready.clone()))
 }
 
 /// Tries the stored identity, refreshing only when its own fresh certificate
 /// no longer matches the authenticated network record. Transport failures do
 /// not establish staleness and never cause a Portal sign-in.
-async fn discover_with_refresh(app: &AppHandle, community: &str) -> Result<Verified, DntlsError> {
-    let path = credentials_bundle_path(app)?;
+async fn discover_with_refresh(
+    path: &Path,
+    data_dir: PathBuf,
+    community: &str,
+) -> Result<Verified, DntlsError> {
     if !path.is_file() {
         return Err(DntlsError::new(
             "credentials_changed",
             "Connect your DNTLS name before adding this community.",
         ));
     }
-    let data_dir = credentials_data_dir(app)?;
     let (resolver, handshaker) = clients(&path, data_dir.clone())?;
     let failure = match discover(community, resolver.clone(), handshaker).await {
         Ok(verified) => return Ok(verified),
@@ -398,7 +440,14 @@ async fn dial(
 
 /// Splices each accepted loopback connection onto its own DNTLS TLS
 /// connection to the verified relay endpoint.
-async fn accept_loop(app: AppHandle, listener: TcpListener, community: String, verified: Verified) {
+async fn accept_loop(
+    app: AppHandle,
+    listener: TcpListener,
+    community: String,
+    bundle: PathBuf,
+    data_dir: PathBuf,
+    verified: Option<Verified>,
+) {
     let verified = Arc::new(tokio::sync::RwLock::new(verified));
     // Dropping the accept loop also aborts established streams on Replace/Remove.
     let mut connections = tokio::task::JoinSet::new();
@@ -417,25 +466,45 @@ async fn accept_loop(app: AppHandle, listener: TcpListener, community: String, v
         let app = app.clone();
         let community = community.clone();
         let verified = verified.clone();
+        let bundle = bundle.clone();
+        let data_dir = data_dir.clone();
         connections.spawn(async move {
-            let current = verified.read().await.clone();
+            let mut current = verified.read().await.clone();
+            if current.is_none() {
+                let state = app.state::<DntlsConnectors>();
+                let _guard = state.operation.lock().await;
+                match discover_with_refresh(&bundle, data_dir.clone(), &community).await {
+                    Ok(ready) => {
+                        *verified.write().await = Some(ready.clone());
+                        current = Some(ready);
+                    }
+                    Err(error) => {
+                        let _ = app.emit("dntls-agent-credentials-error", serde_json::json!({
+                            "pubkey": bundle.parent().and_then(|p| p.file_name()).and_then(|p| p.to_str()),
+                            "message": error.message,
+                        }));
+                        return;
+                    }
+                }
+            }
+            let current = current.expect("connector discovered above");
             let mut remote = match dial(&community, current.addr, &current.handshaker).await {
                 Ok(stream) => stream,
                 Err(_) => {
                     let state = app.state::<DntlsConnectors>();
                     let _guard = state.operation.lock().await;
-                    let updated = match discover_with_refresh(&app, &community).await {
+                    let updated = match discover_with_refresh(&bundle, data_dir.clone(), &community).await {
                         Ok(updated) => updated,
                         Err(error) => {
                             if error.code == "credentials_changed" {
-                                let _ = app.emit("dntls-credentials-changed", ());
+                                emit_credentials_changed(&app, &bundle, &error.message);
                             }
                             eprintln!("buzz-desktop: DNTLS connection unavailable: {}", error.code);
                             return;
                         }
                     };
                     let result = dial(&community, updated.addr, &updated.handshaker).await;
-                    *verified.write().await = updated;
+                    *verified.write().await = Some(updated);
                     match result {
                         Ok(stream) => stream,
                         Err(_) => return,
@@ -451,16 +520,78 @@ async fn accept_loop(app: AppHandle, listener: TcpListener, community: String, v
             {
                 let state = app.state::<DntlsConnectors>();
                 let _guard = state.operation.lock().await;
-                match discover_with_refresh(&app, &community).await {
-                    Ok(updated) => *verified.write().await = updated,
+                match discover_with_refresh(&bundle, data_dir, &community).await {
+                    Ok(updated) => *verified.write().await = Some(updated),
                     Err(error) if error.code == "credentials_changed" => {
-                        let _ = app.emit("dntls-credentials-changed", ());
+                        emit_credentials_changed(&app, &bundle, &error.message);
                     }
                     Err(_) => {}
                 }
             }
         });
     }
+}
+
+fn emit_credentials_changed(app: &AppHandle, bundle: &Path, message: &str) {
+    if credentials_bundle_path(app).ok().as_deref() == Some(bundle) {
+        let _ = app.emit("dntls-credentials-changed", ());
+    } else {
+        let _ = app.emit(
+            "dntls-agent-credentials-error",
+            serde_json::json!({
+                "pubkey": bundle.parent().and_then(|p| p.file_name()).and_then(|p| p.to_str()),
+                "message": message,
+            }),
+        );
+    }
+}
+
+/// Creates an identity-isolated listener without blocking synchronous spawn paths
+/// on network I/O. Discovery and refresh happen before forwarding any bytes.
+pub(crate) fn connector_for_agent(
+    app: &AppHandle,
+    community: &str,
+    pubkey: &str,
+) -> Result<ConnectorReady, String> {
+    let community = normalize_dntls_name(community)?;
+    let bundle = crate::dntls_credentials::agent_credentials_bundle_path(app, pubkey)?;
+    let data_dir = bundle
+        .parent()
+        .ok_or("Agent credentials directory is unavailable")?
+        .join("data");
+    let state = app.state::<DntlsConnectors>();
+    let mut running = state
+        .running
+        .lock()
+        .map_err(|_| "DNTLS connector state is unavailable")?;
+    if !bundle.is_file() {
+        return Err("Connect a name for this agent with a new one-time code.".into());
+    }
+    let key = (community.clone(), bundle.clone());
+    if let Some(connector) = running.get(&key) {
+        return Ok(connector.ready.clone());
+    }
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| e.to_string())?;
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let ready = ConnectorReady {
+        community: community.clone(),
+        relay_url: format!("ws://{}", listener.local_addr().map_err(|e| e.to_string())?),
+    };
+    let app = app.clone();
+    let task = tauri::async_runtime::spawn(async move {
+        match TcpListener::from_std(listener) {
+            Ok(listener) => accept_loop(app, listener, community, bundle, data_dir, None).await,
+            Err(error) => eprintln!("buzz-desktop: agent connector listener failed: {error}"),
+        }
+    });
+    running.insert(
+        key,
+        RunningConnector {
+            ready: ready.clone(),
+            task,
+        },
+    );
+    Ok(ready)
 }
 
 /// Normalizes one exact DNTLS FQDN and rejects URLs or partial names.

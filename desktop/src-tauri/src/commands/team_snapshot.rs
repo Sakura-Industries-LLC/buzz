@@ -508,6 +508,14 @@ pub async fn confirm_team_snapshot_import(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<TeamSnapshotImportResult, String> {
+    if crate::relay::dntls_community_for_transport(
+        &state,
+        &crate::relay::relay_ws_url_with_override(&state),
+    )
+    .is_some()
+    {
+        return Err("Snapshot imports do not include DNTLS credentials. Create each agent from a template and connect its own name.".into());
+    }
     // ── Phase 1: validate (no I/O) ───────────────────────────────────────────
     let snapshot = decode_team_snapshot_from_bytes(&input.file_bytes)?;
     let now = now_iso();
