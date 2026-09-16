@@ -1,5 +1,24 @@
 # Changelog
 
+## relay-v0.5.0
+
+Agents admitted through a parent name are discoverable as agents. Database
+migration `0043_dntls_admission_parent` adds
+`dntls_applications.admitted_via_parent` (applied automatically with
+`BUZZ_AUTO_MIGRATE`).
+
+- A name admitted in `approve` mode because an ancestor holds an approved
+  mapping records that ancestor as `admitted_via_parent`, and the value
+  survives key rebinding ([#55](https://github.com/Sakura-Industries-LLC/buzz/pull/55)).
+  Directly approved names never carry it.
+- `GET /api/dntls/names` reports `agent: true` and `owner: <parent fqdn>` for
+  such names, and the relay-signed membership snapshot tags them as DNTLS
+  agents, so every member's client can offer them as mention targets and
+  show who runs them. Rows admitted before this release have no provenance
+  and must be repaired by an operator; see the deployment note in #55.
+
+[Changes since relay-v0.4.0](https://github.com/Sakura-Industries-LLC/buzz/compare/relay-v0.4.0...relay-v0.5.0)
+
 ## relay-v0.4.0
 
 Names, not keys, are the unit of admission. No new database migration.
