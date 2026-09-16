@@ -409,6 +409,17 @@ async fn probe(
     Ok(())
 }
 
+/// Closes an in-flight handshake even while its blocking verifier is running.
+struct PendingHandshake(Option<std::net::TcpStream>);
+
+impl Drop for PendingHandshake {
+    fn drop(&mut self) {
+        if let Some(socket) = &self.0 {
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
 /// Opens one DNTLS TLS connection to `addr` and requires the relay to
 /// identify as `community`.
 async fn dial(
@@ -425,23 +436,44 @@ async fn dial(
         .await
         .map_err(|_| "connect timed out".to_string())?
         .map_err(|error| format!("connect: {error}"))?;
-    let stream = tokio::time::timeout(DIAL_TIMEOUT, connector.connect(placeholder, tcp))
-        .await
-        .map_err(|_| "DNTLS handshake timed out".to_string())?
-        .map_err(|error| format!("DNTLS handshake: {error}"))?;
+    let tcp = tcp
+        .into_std()
+        .map_err(|error| format!("DNTLS handshake socket: {error}"))?;
+    let mut pending =
+        PendingHandshake(Some(tcp.try_clone().map_err(|error| {
+            format!("DNTLS handshake cancellation socket: {error}")
+        })?));
+    let tcp =
+        TcpStream::from_std(tcp).map_err(|error| format!("DNTLS handshake socket: {error}"))?;
+    // The SDK's rustls verifier blocks while resolving the remote identity.
+    // Drive it on the blocking pool, not a worker needed by the resolver's I/O.
+    // Keep the socket on the app's runtime so it remains usable after the
+    // handshake; a per-connection runtime would strand its I/O on shutdown.
+    let runtime = tokio::runtime::Handle::current();
+    let stream = tokio::task::spawn_blocking(move || {
+        runtime.block_on(async move {
+            tokio::time::timeout(DIAL_TIMEOUT, connector.connect(placeholder, tcp))
+                .await
+                .map_err(|_| "DNTLS handshake timed out".to_string())?
+                .map_err(|error| format!("DNTLS handshake: {error}"))
+        })
+    })
+    .await
+    .map_err(|error| format!("DNTLS handshake task: {error}"))??;
     let remote = handshaker
         .identity(stream.get_ref().1.peer_certificates().unwrap_or(&[]))
         .ok_or_else(|| "relay presented no DNTLS identity".to_string())?;
     if !remote.verified || !remote.fqdn.eq_ignore_ascii_case(community) {
         return Err(format!("connected service identified as {:?}", remote.fqdn));
     }
+    pending.0.take();
     Ok(stream)
 }
 
 /// Splices each accepted loopback connection onto its own DNTLS TLS
 /// connection to the verified relay endpoint.
-async fn accept_loop(
-    app: AppHandle,
+async fn accept_loop<R: tauri::Runtime>(
+    app: AppHandle<R>,
     listener: TcpListener,
     community: String,
     bundle: PathBuf,
@@ -532,7 +564,7 @@ async fn accept_loop(
     }
 }
 
-fn emit_credentials_changed(app: &AppHandle, bundle: &Path, message: &str) {
+fn emit_credentials_changed<R: tauri::Runtime>(app: &AppHandle<R>, bundle: &Path, message: &str) {
     if credentials_bundle_path(app).ok().as_deref() == Some(bundle) {
         let _ = app.emit("dntls-credentials-changed", ());
     } else {
@@ -711,3 +743,6 @@ mod tests {
         assert!(parse_record(bad_key.as_bytes()).is_err());
     }
 }
+
+#[cfg(test)]
+mod concurrency_tests;

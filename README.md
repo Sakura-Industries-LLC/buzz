@@ -154,6 +154,10 @@ Development builds can select a different Portal with
 `BUZZ_DNTLS_PORTAL_URL`; packaged release builds use
 `https://preview.dntls.net`.
 
+If you set `TOKIO_WORKER_THREADS` to work around DNTLS connection failures in
+Buzz DNTLS 0.6.0, remove that override after updating. Connections no longer
+need extra runtime workers on two-CPU machines.
+
 ### I want my own hosted relay
 
 To run a relay for your team without managing servers, you can deploy one to Railway in a click:
