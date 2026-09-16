@@ -1,5 +1,21 @@
 # Changelog
 
+## relay-v0.4.0
+
+Names, not keys, are the unit of admission. No new database migration.
+
+- A verified caller takes over an existing approved or pending mapping for
+  its name in `approve` mode, as `auto` already did ([#40](https://github.com/Sakura-Industries-LLC/buzz/pull/40)).
+  The approval was of the name: the new key is admitted at once and the
+  displaced key loses the mapping and its membership. Rejected mappings are
+  unchanged. A reinstalled Buzz Desktop no longer lands on "Not a member yet".
+- A subname whose ancestor has an approved mapping is admitted as `member`
+  without a second approval ([#43](https://github.com/Sakura-Industries-LLC/buzz/pull/43)).
+  Inherited admission is membership only; `BUZZ_DNTLS_ADMINS` still matches
+  exact names. Pending or rejected ancestors grant nothing.
+
+[Changes since relay-v0.3.0](https://github.com/Sakura-Industries-LLC/buzz/compare/relay-v0.3.0...relay-v0.4.0)
+
 ## relay-v0.3.0
 
 DNTLS join approval from Buzz Desktop. Requires database migration
