@@ -20,6 +20,7 @@ import { cn } from "@/shared/lib/cn";
 
 type SidebarProfileCardProps = {
   activeCommunity: Community | null;
+  communityIdentityName?: string;
   isPresencePending?: boolean;
   onOpenAddCommunity: () => void;
   onOpenSettings: (section?: SettingsSection) => void;
@@ -42,6 +43,7 @@ type SidebarProfileCardProps = {
 
 export function SidebarProfileCard({
   activeCommunity,
+  communityIdentityName,
   isPresencePending,
   onOpenAddCommunity,
   onOpenSettings,
@@ -82,7 +84,9 @@ export function SidebarProfileCard({
     [toggleProfilePopover],
   );
   const hasStatus = Boolean(selfUserStatus?.text || selfUserStatus?.emoji);
-  const communityLabel = activeCommunity?.name ?? "No community";
+  const communityLabel = communityIdentityName
+    ? `${communityIdentityName} · ${activeCommunity?.name ?? "No community"}`
+    : (activeCommunity?.name ?? "No community");
   const readonlyCommunityLabel = (
     <span
       className="flex min-w-0 cursor-pointer items-center gap-1 text-xs leading-snug text-sidebar-foreground/70"

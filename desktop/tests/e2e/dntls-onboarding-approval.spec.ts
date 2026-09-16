@@ -18,7 +18,6 @@ const BLANK_TYLER_IDENTITY = {
 type MockPatch = {
   profileReadError?: string | null;
   profileUpdateError?: string | null;
-  profileUpdateErrors?: string[];
   profileHasEvent?: boolean;
 };
 
@@ -174,35 +173,19 @@ test("first DNTLS join AUTH pending waits then auto-enters after approval", asyn
   await expectAutoEntered(page);
 });
 
-for (const [name, mock, clear] of [
-  ["lookup", { profileReadError: PENDING_HTTP }, { profileReadError: null }],
-  [
-    "publish",
-    { profileUpdateErrors: Array.from({ length: 10 }, () => PENDING_HTTP) },
-    { profileUpdateErrors: [] },
-  ],
-] as const) {
-  test(`first DNTLS join HTTP profile ${name} pending waits then auto-enters after approval`, async ({
-    page,
-  }) => {
-    test.setTimeout(45_000);
-    await bootFirstCommunity(page, mock);
-    await joinFirstDntlsCommunity(page);
-
-    await expectAwaitingApprovalWithoutProfile(
-      page,
-      name === "lookup" ? { stage: "connecting" } : undefined,
-    );
-    if (name === "lookup") {
-      await expect
-        .poll(async () => (await readOnboardingTransaction(page))?.error ?? "")
-        .toContain(PENDING_HTTP);
-    }
-
-    await patchMock(page, clear);
-    await expectAutoEntered(page);
-  });
-}
+test("first DNTLS join HTTP profile lookup pending waits then auto-enters after approval", async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  await bootFirstCommunity(page, { profileReadError: PENDING_HTTP });
+  await joinFirstDntlsCommunity(page);
+  await expectAwaitingApprovalWithoutProfile(page, { stage: "connecting" });
+  await expect
+    .poll(async () => (await readOnboardingTransaction(page))?.error ?? "")
+    .toContain(PENDING_HTTP);
+  await patchMock(page, { profileReadError: null });
+  await expectAutoEntered(page);
+});
 
 test("pending first DNTLS join rejection shows declined request without profile", async ({
   page,
@@ -225,11 +208,13 @@ test("pending first DNTLS join rejection shows declined request without profile"
     .toBe("connecting");
 });
 
-test("approved DNTLS reinstall needs no further membership approval", async ({
+test("approved DNTLS reinstall enters without publishing a profile", async ({
   page,
 }) => {
   test.setTimeout(45_000);
-  await bootFirstCommunity(page);
+  await bootFirstCommunity(page, {
+    profileUpdateError: "Profiles are disabled",
+  });
   await joinFirstDntlsCommunity(page);
   await expect(
     page.getByRole("button", { name: "Take me to Buzz" }),

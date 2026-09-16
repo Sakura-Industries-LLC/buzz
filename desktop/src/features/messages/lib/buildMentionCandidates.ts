@@ -79,6 +79,8 @@ export function buildMentionCandidates({
   const candidatesByPubkey = new Map<string, MentionCandidate>();
   const addCandidate = (candidate: MentionCandidate & { pubkey: string }) => {
     const pubkey = normalizePubkey(candidate.pubkey);
+    const verifiedName = profiles?.[pubkey]?.verifiedDntlsName;
+    if (verifiedName) candidate = { ...candidate, displayName: verifiedName };
     if (isArchived(pubkey)) {
       return;
     }

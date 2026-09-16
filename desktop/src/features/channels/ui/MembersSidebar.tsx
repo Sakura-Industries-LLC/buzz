@@ -29,7 +29,10 @@ import {
   useUserSearchFetchMoreOnScroll,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
-import { formatOwnerLabel } from "@/features/profile/lib/identity";
+import {
+  formatOwnerLabel,
+  resolveUserLabel,
+} from "@/features/profile/lib/identity";
 import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import { VirtualizedList } from "@/shared/ui/VirtualizedList";
@@ -220,6 +223,7 @@ export function MembersSidebar({
         formatMemberName(member, currentPubkey),
         member.displayName ?? "",
         profile?.displayName ?? "",
+        profile?.verifiedDntlsName ?? "",
         memberIsBot ? "agent" : "",
         member.role,
         normalizedPubkey,
@@ -423,6 +427,7 @@ export function MembersSidebar({
         formatMemberName(member, currentPubkey),
         member.displayName ?? "",
         profile?.displayName ?? "",
+        profile?.verifiedDntlsName ?? "",
         memberIsBot ? "agent" : "",
         member.role,
         normalizedPubkey,
@@ -655,8 +660,15 @@ export function MembersSidebar({
         managedAgentRuntime={managedAgentRuntime}
         member={member}
         memberIsBot={memberIsBot}
-        memberAvatarLabel={member.displayName ?? truncatePubkey(member.pubkey)}
-        memberLabel={formatMemberName(member, currentPubkey)}
+        memberAvatarLabel={resolveUserLabel({
+          pubkey: member.pubkey,
+          profiles: memberProfilesQuery.data?.profiles,
+          fallbackName: member.displayName,
+        })}
+        memberLabel={
+          memberProfilesQuery.data?.profiles[normalizePubkey(member.pubkey)]
+            ?.verifiedDntlsName || formatMemberName(member, currentPubkey)
+        }
         moderationState={moderationStateByPubkey.get(
           normalizePubkey(member.pubkey),
         )}

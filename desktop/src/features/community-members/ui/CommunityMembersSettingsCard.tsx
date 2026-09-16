@@ -19,9 +19,7 @@ import {
   formatDntlsRequestedAt,
   relayMemberDisplayName,
 } from "@/features/community-members/lib/dntlsRequests";
-import { mergeVerifiedDntlsNames } from "@/features/profile/lib/identity";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
-import { useDntlsNamesQuery } from "@/features/profile/useDntlsNames";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup";
@@ -314,7 +312,6 @@ export function CommunityMembersSettingsCard({
   const membersQuery = useRelayMembersQuery(canManageRelay);
   const pendingQuery = useDntlsPendingApplicationsQuery(canManageRelay);
   const decideMutation = useDecideDntlsApplicationMutation();
-  const dntlsNamesQuery = useDntlsNamesQuery();
   const members = React.useMemo(
     () => membersQuery.data ?? [],
     [membersQuery.data],
@@ -325,14 +322,7 @@ export function CommunityMembersSettingsCard({
       enabled: canManageRelay && members.length > 0,
     },
   );
-  const profiles = React.useMemo(
-    () =>
-      mergeVerifiedDntlsNames(
-        profilesQuery.data?.profiles,
-        dntlsNamesQuery.data ?? new Map(),
-      ),
-    [dntlsNamesQuery.data, profilesQuery.data?.profiles],
-  );
+  const profiles = profilesQuery.data?.profiles;
   const [inviteDialogOpen, setInviteDialogOpen] = React.useState(false);
   const [search, setSearch] = React.useState("");
   const inFlightRef = React.useRef(new Set<string>());
