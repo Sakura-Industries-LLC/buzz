@@ -46,6 +46,8 @@ import {
 } from "@/features/profile/lib/userLabelStorage";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { updateCachedChannelMemberDisplayName } from "@/features/channels/channelMemberProfileCache";
+import { mergeVerifiedDntlsNames } from "@/features/profile/lib/identity";
+import { useDntlsNamesQuery } from "@/features/profile/useDntlsNames";
 
 export const profileQueryKey = ["profile"] as const;
 export const contactListQueryKey = (pubkey: string) =>
@@ -333,6 +335,8 @@ export function useUsersBatchQuery(
     .sort();
   const enabled = (options?.enabled ?? true) && normalizedPubkeys.length > 0;
 
+  const dntlsNamesQuery = useDntlsNamesQuery();
+  const pubkeysKey = normalizedPubkeys.join(",");
   const query = useQuery<UsersBatchResponse>({
     enabled,
     queryKey: ["users-batch", ...normalizedPubkeys],
@@ -413,7 +417,20 @@ export function useUsersBatchQuery(
     }
   }, [query.data, query.dataUpdatedAt, queryClient]);
 
-  return query;
+  // Keep attestations out of the nickname caches; a new names snapshot must
+  // update labels even while the kind:0 batch is fresh or has no profile.
+  const data = React.useMemo(() => {
+    if (!dntlsNamesQuery.data?.size) return query.data;
+    return {
+      profiles: mergeVerifiedDntlsNames(
+        query.data?.profiles,
+        dntlsNamesQuery.data,
+        pubkeysKey.split(","),
+      ),
+      missing: query.data?.missing ?? [],
+    };
+  }, [query.data, dntlsNamesQuery.data, pubkeysKey]);
+  return { ...query, data };
 }
 
 export function useUserSearchQuery(

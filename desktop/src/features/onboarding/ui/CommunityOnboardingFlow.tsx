@@ -366,13 +366,6 @@ export function CommunityOnboardingFlow({
           setIsAwaitingApproval(false);
           return "continue";
         }
-        try {
-          await updateProfile({ displayName: connectedName });
-        } catch (error) {
-          const view = membershipGateViewForError(error);
-          if (view === "membership-denied") return "denied";
-          return "pending";
-        }
       } else {
         if (!isCurrent()) return "pending";
         update({ stage: "profile", error: undefined }, transaction.id);
@@ -392,9 +385,8 @@ export function CommunityOnboardingFlow({
   React.useEffect(() => {
     approvalAttemptRef.current = tryEnterAfterApproval;
   }, [tryEnterAfterApproval]);
-  // Skip the display-name step when the relay already has a profile, or when
-  // this is a DNTLS community: the verified DNTLS name the user chose is
-  // their name, so it is published as the display name without asking.
+  // DNTLS identities are labeled by the relay's attestation, not a kind:0
+  // nickname. Existing profiles and DNTLS joins skip the nickname step.
   React.useEffect(() => {
     if (!isProfileStage || !transaction) return;
     if (checkedProfileTransactionRef.current === transaction.id) return;
@@ -424,18 +416,6 @@ export function CommunityOnboardingFlow({
       const status = await dntlsCredentialsStatus().catch(() => null);
       const connectedName = status?.name?.trim();
       if (!connectedName) return;
-      try {
-        await updateProfile({ displayName: connectedName });
-      } catch (error) {
-        if (await routeMembershipError(error)) {
-          awaitingResumeRef.current = "dntls-skip";
-          return;
-        }
-        // Publishing failed for another reason: fall through to the manual
-        // step, seeded with the name so the user only has to confirm.
-        setDisplayName((prev) => (prev === "" ? connectedName : prev));
-        return;
-      }
       skipToTeam();
     })();
   }, [isProfileStage, routeMembershipError, transaction, update]);

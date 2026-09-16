@@ -137,7 +137,7 @@ export function resolveUserLabel(input: {
   }
 
   const safeFallback = fallbackName?.trim();
-  if (safeFallback) {
+  if (safeFallback && !/^[0-9a-f]{64}$/i.test(safeFallback)) {
     return safeFallback;
   }
 
@@ -199,6 +199,7 @@ export function formatOwnerLabel(
 
   const owner = ownerProfiles?.[normalizedOwnerPubkey];
   return (
+    owner?.verifiedDntlsName?.trim() ||
     owner?.displayName?.trim() ||
     owner?.nip05Handle?.trim() ||
     truncatePubkey(ownerPubkey)
@@ -212,10 +213,13 @@ export function formatOwnerLabel(
 export function mergeVerifiedDntlsNames(
   profiles: UserProfileLookup | undefined,
   names: ReadonlyMap<string, { fqdn: string; approvedAt: number }>,
+  pubkeys?: readonly string[],
 ): UserProfileLookup {
   const merged: UserProfileLookup = { ...(profiles ?? {}) };
-  for (const [pubkey, name] of names) {
+  for (const pubkey of pubkeys ?? names.keys()) {
     const key = normalizePubkey(pubkey);
+    const name = names.get(key);
+    if (!name) continue;
     const existing = merged[key];
     merged[key] = {
       displayName: existing?.displayName ?? null,

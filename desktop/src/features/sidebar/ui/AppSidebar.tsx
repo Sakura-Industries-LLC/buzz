@@ -1,6 +1,9 @@
 // biome-ignore format: keep compact to stay within file size limit
 import * as React from "react";
 import { FeatureGate } from "@/shared/features";
+import { useDntlsCredentialsQuery } from "@/features/communities/useDntlsCredentials";
+import { useDntlsNamesQuery } from "@/features/profile/useDntlsNames";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
 
 import { AddCommunityDialog } from "@/features/communities/ui/AddCommunityDialog";
@@ -141,6 +144,11 @@ export function AppSidebar({
   onUnstarChannel,
 }: AppSidebarProps) {
   const activeWorkingByChannelId = useActiveWorkingChannelsById();
+  const credentialsQuery = useDntlsCredentialsQuery();
+  const namesQuery = useDntlsNamesQuery();
+  const communityIdentityName = namesQuery.data?.get(
+    normalizePubkey(currentPubkey ?? ""),
+  )?.fqdn;
   const { status: updateStatus } = useUpdaterContext();
   const canShowSidebarUpdateCard = shouldShowSidebarUpdateCard(updateStatus);
   const { open: sidebarOpen, openMobile } = useSidebar();
@@ -446,6 +454,8 @@ export function AppSidebar({
     streamChannels,
   });
   const resolvedDisplayName =
+    credentialsQuery.data?.name?.trim() ||
+    communityIdentityName ||
     profile?.displayName?.trim() ||
     fallbackDisplayName?.trim() ||
     "Current identity";
@@ -850,6 +860,7 @@ export function AppSidebar({
               <SidebarMenuItem>
                 <SidebarProfileCard
                   activeCommunity={activeCommunity}
+                  communityIdentityName={communityIdentityName}
                   isPresencePending={isPresencePending}
                   onOpenAddCommunity={onOpenAddCommunity}
                   onOpenSettings={onSelectSettings}

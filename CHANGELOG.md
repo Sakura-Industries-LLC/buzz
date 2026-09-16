@@ -6,6 +6,10 @@
 
 - Fix concurrent DNTLS connections stalling on two-CPU machines after community
   approval. The `TOKIO_WORKER_THREADS` workaround is no longer needed ([#47](https://github.com/Sakura-Industries-LLC/buzz/issues/47)).
+- Use verified DNTLS names across messages, members, mentions, and direct messages,
+  including members without profiles. Refresh the sidebar identity after replacing
+  credentials, and stop publishing profile nicknames during DNTLS onboarding
+  ([#50](https://github.com/Sakura-Industries-LLC/buzz/issues/50)).
 
 ## v0.5.20
 

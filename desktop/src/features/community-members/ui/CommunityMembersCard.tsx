@@ -3,6 +3,7 @@ import { MoreHorizontal, Plus, Shield, ShieldCheck, User } from "lucide-react";
 import { toast } from "sonner";
 
 import { useUsersBatchQuery } from "@/features/profile/hooks";
+import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import { PubKey } from "@/shared/ui/PubKey";
 import {
@@ -252,9 +253,10 @@ export function CommunityMembersCard({
           {members.map((member) => (
             <MemberRow
               currentPubkey={currentPubkey}
-              displayName={
-                profiles[member.pubkey.toLowerCase()]?.displayName ?? null
-              }
+              displayName={resolveUserLabel({
+                pubkey: member.pubkey,
+                profiles,
+              })}
               key={member.pubkey}
               member={member}
               onChangeRole={handleChangeRole}
@@ -276,7 +278,7 @@ export function CommunityMembersCard({
         member={removeTarget}
         displayName={
           removeTarget
-            ? (profiles[removeTarget.pubkey.toLowerCase()]?.displayName ?? null)
+            ? resolveUserLabel({ pubkey: removeTarget.pubkey, profiles })
             : null
         }
         onOpenChange={(open) => {

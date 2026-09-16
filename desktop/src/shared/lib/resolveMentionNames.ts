@@ -26,6 +26,8 @@ function collectProfileAliases(
   }
 
   const aliases: string[] = [];
+  const verifiedName = profile.verifiedDntlsName?.trim();
+  if (verifiedName) aliases.push(verifiedName);
   const displayName = profile.displayName?.trim();
   if (displayName) {
     aliases.push(displayName);

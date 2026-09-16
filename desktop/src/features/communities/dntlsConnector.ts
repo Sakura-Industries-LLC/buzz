@@ -29,6 +29,15 @@ export const DNTLS_CREDENTIALS_CHANGED_MESSAGE =
   "Your name's credentials changed. Export a new one-time code.";
 
 const recoveryListeners = new Set<() => void>();
+const credentialListeners = new Set<() => void>();
+
+/** Subscribe to successful local bundle replacements and removal. */
+export function subscribeDntlsCredentials(listener: () => void): () => void {
+  credentialListeners.add(listener);
+  return () => {
+    credentialListeners.delete(listener);
+  };
+}
 
 /** Return the normalized name when input is an exact DNTLS FQDN. */
 export function dntlsCommunityName(input: string): string | null {
@@ -151,15 +160,21 @@ export function dntlsCredentialsStatus(): Promise<DntlsCredentialsStatus> {
  * Redeem a Portal one-time code and store the resulting credentials bundle.
  * Callers must not log `code`.
  */
-export function redeemDntlsCredentialCode(
+export async function redeemDntlsCredentialCode(
   code: string,
 ): Promise<DntlsRedeemed> {
-  return invokeDntls<DntlsRedeemed>("redeem_dntls_credential_code", { code });
+  const result = await invokeDntls<DntlsRedeemed>(
+    "redeem_dntls_credential_code",
+    { code },
+  );
+  for (const listener of credentialListeners) listener();
+  return result;
 }
 
 /** Delete the stored credentials file. */
-export function removeDntlsCredentials(): Promise<void> {
-  return invokeDntls("remove_dntls_credentials");
+export async function removeDntlsCredentials(): Promise<void> {
+  await invokeDntls("remove_dntls_credentials");
+  for (const listener of credentialListeners) listener();
 }
 
 /** Ask the shared recovery UI to collect a new one-time code. */

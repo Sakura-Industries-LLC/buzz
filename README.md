@@ -150,6 +150,12 @@ resets existing DNTLS connections. **Remove** disconnects the identity.
 Buzz refreshes stale credentials after renewal. If the name's credentials
 have changed and can no longer sign in, Buzz asks for a new one-time code.
 
+The sidebar profile chip shows the name in your current credentials. Inside a
+community, Buzz uses the name verified by that community for messages, member
+lists, mentions, and direct messages, even when the member has not set a
+profile nickname. A nickname does not override a verified name. The community
+line below the chip shows which verified identity is active there.
+
 Development builds can select a different Portal with
 `BUZZ_DNTLS_PORTAL_URL`; packaged release builds use
 `https://preview.dntls.net`.
