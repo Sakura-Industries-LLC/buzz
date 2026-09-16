@@ -1620,7 +1620,6 @@ test("Inbox DM context excludes system events without changing the channel timel
   );
   await expect(detail.locator("[data-message-id]")).toHaveCount(3);
   await expect(detail).not.toContainText("future_system_event");
-  await page.screenshot({ path: "test-results/inbox-system-events.png" });
 
   await detail.getByTestId("home-inbox-open-context").click();
   await expect(
