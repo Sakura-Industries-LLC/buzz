@@ -886,9 +886,9 @@ mod tests {
     fn dntls_blossom_auth_uses_community_not_loopback() {
         use buzz_media_pkg::auth::{verify_blossom_get_auth, verify_blossom_upload_auth};
 
-        let state = crate::app_state::build_app_state();
-        *state.relay_url_override.lock().unwrap() = Some("ws://127.0.0.1:43151".into());
-        *state.canonical_relay_host.lock().unwrap() = Some("buzz.dntls".into());
+        let mut state = crate::app_state::build_app_state();
+        *state.relay_url_override.get_mut().unwrap() = Some("ws://127.0.0.1:43151".into());
+        *state.canonical_relay_host.get_mut().unwrap() = Some("buzz.dntls".into());
         let base = relay_api_base_url_with_override(&state);
         let server = blossom_server_authority(&state, &base).unwrap();
         let keys = Keys::generate();
