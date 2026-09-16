@@ -1,3 +1,4 @@
+import { AgentDntlsCodeDialog } from "@/features/agents/ui/AgentDntlsCredentials";
 import { isTauri } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -663,6 +664,7 @@ function CommunityApp({
           onIdentityReplaced={bumpSignerEpoch}
         />
         <CommunityThemeController />
+        <AgentDntlsCodeDialog />
         <AppReady
           isCommunitySwitch={isCommunitySwitch}
           key={communityKey}

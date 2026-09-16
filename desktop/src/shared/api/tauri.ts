@@ -1,4 +1,9 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { withAgentDntlsCode } from "@/features/agents/agentDntlsCode";
+import {
+  loadActiveCommunityId,
+  loadCommunities,
+} from "@/features/communities/communityStorage";
 import {
   captureTauriErrorObservers,
   toTauriError,
@@ -118,6 +123,8 @@ import type { RestartDiffEntry as RawRestartDiffEntry } from "./restartDiff";
 export type RawManagedAgent = {
   pubkey: string;
   name: string;
+  dntls_name?: string | null;
+  dntls_community?: string | null;
   persona_id: string | null;
   // Optional: pre-feature fixtures may omit it. The record's harness/runtime id.
   runtime?: string | null;
@@ -607,6 +614,8 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
   return {
     pubkey: agent.pubkey,
     name: agent.name,
+    dntlsName: agent.dntls_name ?? null,
+    dntlsCommunity: agent.dntls_community ?? null,
     personaId: agent.persona_id,
     runtime: agent.runtime ?? null,
     teamId: agent.team_id ?? null,
@@ -758,11 +767,29 @@ export async function listManagedAgents(): Promise<ManagedAgent[]> {
   );
 }
 export async function createManagedAgent(input: CreateManagedAgentInput) {
+  const community = loadCommunities().find(
+    (item) => item.id === loadActiveCommunityId(),
+  );
+  if (community?.dntlsName) {
+    return withAgentDntlsCode(community.dntlsName, (code) =>
+      createManagedAgentWithCredentials(input, community.dntlsName, code),
+    );
+  }
+  return createManagedAgentWithCredentials(input);
+}
+
+async function createManagedAgentWithCredentials(
+  input: CreateManagedAgentInput,
+  dntlsCommunity?: string,
+  dntlsCredentialCode?: string,
+) {
   const response = await invokeTauri<RawCreateManagedAgentResponse>(
     "create_managed_agent",
     {
       input: {
         name: input.name,
+        dntlsCommunity,
+        dntlsCredentialCode,
         personaId: input.personaId,
         teamId: input.teamId,
         relayUrl: input.relayUrl,
@@ -795,6 +822,19 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
     profileSyncError: response.profile_sync_error,
     spawnError: response.spawn_error,
   };
+}
+
+export async function replaceManagedAgentDntlsCredentials(
+  pubkey: string,
+  code: string,
+  community: string,
+): Promise<ManagedAgent> {
+  return fromRawManagedAgent(
+    await invokeTauri<RawManagedAgent>(
+      "replace_managed_agent_dntls_credentials",
+      { pubkey, code, community },
+    ),
+  );
 }
 
 export async function deleteManagedAgent(

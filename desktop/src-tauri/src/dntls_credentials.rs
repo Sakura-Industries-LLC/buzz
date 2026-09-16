@@ -105,6 +105,110 @@ pub(crate) fn credentials_bundle_path(app: &AppHandle) -> Result<PathBuf, String
     Ok(dntls_dir(app)?.join(CREDENTIALS_FILE))
 }
 
+/// Credential location for one managed agent; no caller-controlled path segments.
+pub(crate) fn agent_credentials_bundle_path(
+    app: &AppHandle,
+    pubkey: &str,
+) -> Result<PathBuf, String> {
+    if pubkey.len() != 64
+        || !pubkey
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err("Invalid agent identity.".into());
+    }
+    Ok(dntls_dir(app)?
+        .join("agents")
+        .join(pubkey)
+        .join(CREDENTIALS_FILE))
+}
+
+/// Reads the actual stored identity, rather than trusting UI metadata.
+pub(crate) fn agent_name(app: &AppHandle, pubkey: &str) -> Option<String> {
+    let bytes =
+        Zeroizing::new(std::fs::read(agent_credentials_bundle_path(app, pubkey).ok()?).ok()?);
+    credentials_fqdn(&bytes).ok()
+}
+
+/// Redeems only an agent subname on the owner's network. The code is never saved.
+pub(crate) async fn redeem_agent_credentials(
+    app: &AppHandle,
+    pubkey: &str,
+    code: String,
+) -> Result<String, DntlsError> {
+    let code = Zeroizing::new(code);
+    let dest = agent_credentials_bundle_path(app, pubkey)?;
+    let connectors = app.state::<DntlsConnectors>();
+    let _guard = connectors.operation.lock().await;
+    let owner_bytes = Zeroizing::new(
+        std::fs::read(credentials_bundle_path(app)?)
+            .map_err(|_| "Connect your DNTLS name before connecting an agent.".to_string())?,
+    );
+    let owner = identity::decode_credentials(&owner_bytes).map_err(|e| e.to_string())?;
+    let client = portal::Client::new(&portal_origin(), [])?;
+    let bundle = client.redeem_credential_code(code.trim()).await?;
+    let bytes = Zeroizing::new(bundle.bytes);
+    let credentials = identity::decode_credentials(&bytes)
+        .map_err(|_| "The Portal returned invalid credentials.".to_string())?;
+    let name = credentials.fqdn().to_string();
+    validate_agent_name(owner.fqdn(), &name)?;
+    if credentials.network_id() != owner.network_id() {
+        return Err("The agent's name must belong to your DNTLS network."
+            .to_string()
+            .into());
+    }
+    let agents_dir = dntls_dir(app)?.join("agents");
+    if agents_dir.is_dir() {
+        for entry in std::fs::read_dir(&agents_dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let other = entry.file_name().to_string_lossy().into_owned();
+            if other != pubkey && agent_name(app, &other).as_deref() == Some(&name) {
+                return Err("That name is already connected to another agent."
+                    .to_string()
+                    .into());
+            }
+        }
+    }
+    let dir = dest
+        .parent()
+        .ok_or_else(|| "Agent credentials directory is unavailable".to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let staged = stage_restricted(&dest, &bytes)?;
+    remove_if_present(&dir.join("data").join(PINS_FILE))?;
+    connectors.remove_bundle(&dest)?;
+    staged
+        .commit()
+        .map_err(|e| format!("install agent credentials: {e}"))?;
+    Ok(name)
+}
+
+fn validate_agent_name(owner: &str, agent: &str) -> Result<(), String> {
+    if !agent
+        .strip_suffix(owner)
+        .is_some_and(|prefix| prefix.ends_with('.') && prefix.len() > 1)
+    {
+        return Err("Export a one-time code for a subname of your name, not your own name.".into());
+    }
+    Ok(())
+}
+
+/// Removes all local credentials and live connections for exactly one agent.
+pub(crate) async fn remove_agent_credentials(app: &AppHandle, pubkey: &str) -> Result<(), String> {
+    let path = agent_credentials_bundle_path(app, pubkey)?;
+    let connectors = app.state::<DntlsConnectors>();
+    let _guard = connectors.operation.lock().await;
+    remove_if_present(&path)?;
+    connectors.remove_bundle(&path)?;
+    if let Some(dir) = path.parent() {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("Remove agent credentials: {e}")),
+        }
+    }
+    Ok(())
+}
+
 /// Network endpoint pins authenticated by the bundle's trust root.
 pub(crate) fn credentials_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = dntls_dir(app)?.join("data");
@@ -161,7 +265,7 @@ pub(crate) async fn redeem_dntls_credential_code(
     staged
         .commit()
         .map_err(|error| format!("install DNTLS credentials: {error}"))?;
-    connectors.reset();
+    connectors.remove_bundle(&credentials_bundle_path(&app)?)?;
     Ok(DntlsConnected { name })
 }
 
@@ -173,7 +277,7 @@ pub(crate) async fn remove_dntls_credentials(
 ) -> Result<(), DntlsError> {
     let _guard = connectors.operation.lock().await;
     remove_if_present(&credentials_bundle_path(&app)?)?;
-    connectors.reset();
+    connectors.remove_bundle(&credentials_bundle_path(&app)?)?;
     Ok(())
 }
 
@@ -259,6 +363,21 @@ fn stage_restricted(path: &Path, data: &[u8]) -> Result<AtomicWriteFile, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_name_must_be_strictly_below_the_owner() {
+        assert!(validate_agent_name("alice.dntls", "fizz.alice.dntls").is_ok());
+        assert!(validate_agent_name("alice.example.dntls", "fizz.alice.example.dntls").is_ok());
+        for name in [
+            "alice.dntls",
+            "fizz.malice.dntls",
+            "fizz.bob.dntls",
+            "alice.dntls.attacker.dntls",
+        ] {
+            assert!(validate_agent_name("alice.dntls", name).is_err(), "{name}");
+        }
+        assert!(validate_agent_name("alice.example.dntls", "fizz.example.dntls").is_err());
+    }
 
     #[test]
     fn staged_replacement_preserves_previous_bundle_until_commit() {

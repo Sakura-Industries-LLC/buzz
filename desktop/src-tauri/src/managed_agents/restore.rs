@@ -168,6 +168,14 @@ pub async fn restore_managed_agents_on_launch(
         let candidates: Vec<String> = records
             .iter()
             .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
+            .filter(|record| {
+                crate::relay::dntls_community_for_transport(
+                    &state,
+                    &crate::relay::relay_ws_url_with_override(&state),
+                )
+                .is_none()
+                    || crate::dntls_credentials::agent_name(app, &record.pubkey).is_some()
+            })
             .map(|record| record.pubkey.clone())
             .collect();
 

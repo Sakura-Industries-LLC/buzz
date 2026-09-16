@@ -178,6 +178,13 @@ pub(crate) fn build_deploy_payload<R: tauri::Runtime>(
     if let Some(err) = crate::managed_agents::spawn_key_refusal(record) {
         return Err(err);
     }
+    let relay_url = crate::relay::effective_agent_relay_url(
+        &record.relay_url,
+        &relay_ws_url_with_override(state),
+    );
+    if crate::relay::dntls_community_for_transport(state, &relay_url).is_some() {
+        return Err("DNTLS agents must run locally with their own connected name.".into());
+    }
 
     let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
     let personas = load_personas(app).unwrap_or_default();
@@ -212,10 +219,7 @@ pub(crate) fn build_deploy_payload<R: tauri::Runtime>(
 
     Ok(deploy_payload_json(
         record,
-        crate::relay::effective_agent_relay_url(
-            &record.relay_url,
-            &relay_ws_url_with_override(state),
-        ),
+        relay_url,
         DeployProjections {
             effective_model: effective.model.value,
             effective_provider: effective.provider.value,

@@ -719,6 +719,8 @@ fn summary_fixture(
     super::ManagedAgentSummary {
         pubkey: "aa".repeat(32),
         name: "test".into(),
+        dntls_name: None,
+        dntls_community: None,
         persona_id: None,
         runtime: None,
         team_id: None,

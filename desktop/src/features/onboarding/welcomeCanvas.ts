@@ -2,21 +2,22 @@ import { getCanvas, setCanvas } from "@/shared/api/tauri";
 
 export const WELCOME_CANVAS_CONTENT = `# Welcome to Buzz
 
-This private channel is your home base for getting oriented. Fizz, Honey, and Pollen can help you learn the app, troubleshoot setup, and work through something you are building.
+This private channel is your home base for getting oriented. Browse channels, create a channel, or choose an agent template when you are ready.
 
-## Work with your agents
+## Create an agent
 
+- In a DNTLS community, connect each agent's own subname with a one-time code from the Portal.
 - Mention an agent when you want its help.
 - Bring multiple agents into the same conversation when you want different perspectives.
 - Keep decisions, progress, and results in the channel so everyone shares the same context.
 
 ## Try something
 
-Bring the team something you are building, or give them a quick challenge to see how they work together.
+Create an agent for something you are building, then invite it to the channel where you want to work.
 
 ## Get help
 
-Ask the team a question here, or read the [Buzz user guide](https://github.com/block/buzz#readme).
+Read the [Buzz user guide](https://github.com/block/buzz#readme).
 `;
 
 type WelcomeCanvasClient = {

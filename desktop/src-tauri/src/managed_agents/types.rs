@@ -494,6 +494,8 @@ pub struct ManagedAgentProcess {
 pub struct ManagedAgentSummary {
     pub pubkey: String,
     pub name: String,
+    pub dntls_name: Option<String>,
+    pub dntls_community: Option<String>,
     pub persona_id: Option<String>,
     /// The record's harness/runtime id (mirror of `ManagedAgentRecord.runtime`).
     /// Lets the UI count agents referencing a harness definition (e.g. in the

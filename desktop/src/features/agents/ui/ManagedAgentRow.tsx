@@ -24,6 +24,7 @@ import { PubKey } from "@/shared/ui/PubKey";
 import { SubsectionLabel } from "@/shared/ui/PageHeader";
 import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import { RestartDiffBadge } from "./RestartDiffBadge";
+import { AgentDntlsIdentity } from "./AgentDntlsCredentials";
 
 export function ManagedAgentRow({
   agent,
@@ -174,6 +175,9 @@ export function ManagedAgentRow({
             Manage
           </Button>
         </div>
+      </div>
+      <div className="px-4 pb-3">
+        <AgentDntlsIdentity agent={agent} />
       </div>
 
       {isLocal && isLogSelected ? (

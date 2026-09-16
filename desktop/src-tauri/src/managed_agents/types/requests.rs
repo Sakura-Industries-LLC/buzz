@@ -131,6 +131,10 @@ pub struct UpdatePersonaRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CreateManagedAgentRequest {
     pub name: String,
+    /// Stable DNTLS authority for this agent's community.
+    pub dntls_community: Option<String>,
+    /// Consumed once before creating a DNTLS agent; never persisted.
+    pub dntls_credential_code: Option<String>,
     #[serde(default)]
     pub persona_id: Option<String>,
     /// Optional deployment-time team binding for runtime instruction layering.
