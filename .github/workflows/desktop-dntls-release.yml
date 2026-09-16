@@ -137,6 +137,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             desktop-file-utils \
+            file \
             libasound2-dev \
             libayatana-appindicator3-dev \
             libgtk-3-dev \
@@ -145,7 +146,26 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libxdo-dev \
             patchelf \
+            squashfs-tools \
             xdg-utils
+
+      # fix-appimage.sh repacks the AppImage with appimagetool. Both the tool and
+      # the type2 runtime it embeds are pinned by hash, as in upstream
+      # release.yml, because appimagetool otherwise fetches the runtime from its
+      # mutable `continuous` tag.
+      - name: Install appimagetool
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          wget -q --tries=3 --timeout=30 -O /tmp/appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /tmp/appimagetool" | sha256sum -c
+          sudo install -m 755 /tmp/appimagetool /usr/local/bin/appimagetool
+          wget -q --tries=3 --timeout=30 -O /tmp/appimage-runtime \
+            https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+          echo "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  /tmp/appimage-runtime" | sha256sum -c
+          sudo install -D -m 644 /tmp/appimage-runtime /usr/local/lib/appimage-runtime
+          echo "APPIMAGETOOL_RUNTIME_FILE=/usr/local/lib/appimage-runtime" >> "$GITHUB_ENV"
 
       # Pinned to the action's 1.95.0 branch, matching rust-toolchain.toml.
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
@@ -239,8 +259,10 @@ jobs:
           echo "key_path=$key_path" >> "$GITHUB_OUTPUT"
 
       # The Apple variables are read only by the macOS bundler; Linux ignores
-      # them.
-      - name: Build and upload the bundles
+      # them. Only macOS uploads from here: the Linux AppImage is repaired
+      # below before it is published, so tauri-action gets no tag on Linux and
+      # only builds.
+      - name: Build the bundles
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -253,7 +275,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: desktop
-          tagName: ${{ needs.setup.outputs.tag }}
+          tagName: ${{ runner.os == 'macOS' && needs.setup.outputs.tag || '' }}
           releaseDraft: false
           prerelease: false
           # latest.json is assembled once, after every platform has uploaded,
@@ -261,6 +283,40 @@ jobs:
           uploadUpdaterJson: false
           retryAttempts: 2
           args: --target ${{ matrix.target }} ${{ matrix.bundles }} --config src-tauri/tauri.release.conf.json
+
+      # linuxdeploy bundles libwayland-client, GLib, and the GStreamer core into
+      # the AppImage. On hosts with Mesa 25+ (Arch, Fedora 42+) libEGL hits the
+      # bundled libwayland and eglGetDisplay fails with EGL_BAD_PARAMETER, which
+      # kills WebKitWebProcess before the window appears. Upstream's script drops
+      # those libraries in favour of the host copies, shims the GStreamer plugin
+      # path, repacks, and re-signs the AppImage with the updater key.
+      - name: Fix the AppImage
+        if: runner.os == 'Linux'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mapfile -t appimages < <(find "desktop/src-tauri/target/${TARGET}/release/bundle/appimage" -name '*.AppImage' -type f)
+          if [[ ${#appimages[@]} -ne 1 ]]; then
+            echo "::error::Expected exactly one AppImage, found ${#appimages[@]}: ${appimages[*]}"
+            exit 1
+          fi
+          bash desktop/scripts/fix-appimage.sh "${appimages[0]}"
+
+      # GitHub replaces the spaces in "Buzz DNTLS_..." with dots on upload, the
+      # same names tauri-action produces for the macOS bundles.
+      - name: Upload the Linux bundles
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.setup.outputs.tag }}
+        run: |
+          set -euo pipefail
+          bundle="desktop/src-tauri/target/${TARGET}/release/bundle"
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber \
+            "$bundle"/deb/*.deb "$bundle"/deb/*.deb.sig \
+            "$bundle"/appimage/*.AppImage "$bundle"/appimage/*.AppImage.sig
 
       - name: Remove the notary API key
         if: always() && steps.notary.outputs.key_path != ''
