@@ -17,6 +17,9 @@
   and resolve typed full-name mentions without a picker. Existing admissions need
   operator-reviewed parent provenance before discovery can classify them
   ([#53](https://github.com/Sakura-Industries-LLC/buzz/issues/53)).
+- Hide system events from Inbox message details so opening a direct message no
+  longer shows relay-authored JSON. Channel timelines are unchanged
+  ([#57](https://github.com/Sakura-Industries-LLC/buzz/issues/57)).
 
 ## v0.5.20
 

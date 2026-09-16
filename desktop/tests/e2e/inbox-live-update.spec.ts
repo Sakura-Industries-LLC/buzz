@@ -32,6 +32,7 @@ type MockWindow = Window & {
     mentionPubkeys?: string[];
     id?: string;
     kind?: number;
+    createdAt?: number;
     extraTags?: string[][];
   }) => RelayEvent;
   __BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?: (item: {
@@ -1533,4 +1534,105 @@ test.describe("inbox stable-conversation regressions", () => {
     // Drift compensation uses scrollBy — must NOT call scrollIntoView again.
     expect(await getScrollIntoViewCount(page)).toBe(1);
   });
+});
+
+test("Inbox DM context excludes system events without changing the channel timeline", async ({
+  page,
+}) => {
+  const relayPubkey = "ab".repeat(32);
+  await installMockBridge(page, { relaySelf: relayPubkey });
+  await page.goto("/");
+  await waitForBridgeReady(page);
+
+  const { first, selected } = await page.evaluate(
+    ({ relayPubkey, senderPubkey }) => {
+      const win = window as MockWindow;
+      const emit = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__!;
+      const push = win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__!;
+      const channelName = "alice-tyler";
+      const createdAt = Math.floor(Date.now() / 1000);
+      emit({
+        channelName,
+        pubkey: relayPubkey,
+        kind: 40099,
+        content: JSON.stringify({ type: "dm_created", actor: senderPubkey }),
+        createdAt: createdAt - 3,
+        id: "d0".repeat(32),
+      });
+      const first = emit({
+        channelName,
+        pubkey: senderPubkey,
+        content: "First human DM message.",
+        createdAt: createdAt - 2,
+        id: "d1".repeat(32),
+      });
+      const selected = emit({
+        channelName,
+        pubkey: senderPubkey,
+        content: "Latest human DM message.",
+        createdAt: createdAt - 1,
+        id: "d2".repeat(32),
+      });
+      push({
+        ...selected,
+        channel_id: "f48efb06-0c93-5025-aac9-2e646bb6bfa8",
+        channel_name: channelName,
+        category: "activity",
+      });
+      return { first, selected };
+    },
+    { relayPubkey, senderPubkey: TEST_IDENTITIES.alice.pubkey },
+  );
+
+  await page.getByTestId(`home-inbox-item-${selected.id}`).click();
+  const detail = getDetailPane(page);
+  await expect(detail.getByRole("heading")).toHaveText("DM with alice");
+  await expect(detail).toContainText(first.content);
+  await expect(detail).toContainText(selected.content);
+  await expect(detail).not.toContainText("dm_created");
+  await expect(detail.locator("[data-message-id]").first()).toHaveAttribute(
+    "data-message-id",
+    first.id,
+  );
+
+  // A different system type arriving live must not become a user message either.
+  await page.evaluate(
+    ({ relayPubkey, senderPubkey }) => {
+      const emit = (window as MockWindow).__BUZZ_E2E_EMIT_MOCK_MESSAGE__!;
+      emit({
+        channelName: "alice-tyler",
+        pubkey: relayPubkey,
+        kind: 40099,
+        content: JSON.stringify({ type: "future_system_event" }),
+        id: "d3".repeat(32),
+      });
+      emit({
+        channelName: "alice-tyler",
+        pubkey: senderPubkey,
+        content: "Human message after the live system event.",
+        id: "d4".repeat(32),
+      });
+    },
+    { relayPubkey, senderPubkey: TEST_IDENTITIES.alice.pubkey },
+  );
+  await expect(detail).toContainText(
+    "Human message after the live system event.",
+  );
+  await expect(detail.locator("[data-message-id]")).toHaveCount(3);
+  await expect(detail).not.toContainText("future_system_event");
+
+  await detail.getByTestId("home-inbox-open-context").click();
+  await expect(
+    page.getByTestId("message-row").filter({ hasText: first.content }),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByTestId("message-row")
+      .filter({ hasText: selected.content })
+      .first(),
+  ).toBeVisible();
+  await expect(page.getByText("dm_created", { exact: false })).toHaveCount(0);
+  await expect(
+    page.getByText("future_system_event", { exact: false }),
+  ).toHaveCount(0);
 });
