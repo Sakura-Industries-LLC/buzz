@@ -194,15 +194,3 @@ jobs:
         run: just _ensure-sidecar-stubs
       - name: DNTLS connector tests
         run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml --lib dntls_connector
-      # Temporary source-build artifact for issue #47 desktop acceptance.
-      - name: Build the Linux acceptance executable
-        if: runner.os == 'Linux'
-        run: pnpm -C desktop tauri build --ci --debug --no-bundle
-      - name: Upload the Linux acceptance executable
-        if: runner.os == 'Linux'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: buzz-desktop-linux-x86_64-source-build
-          path: desktop/src-tauri/target/debug/buzz-desktop
-          if-no-files-found: error
-          retention-days: 7

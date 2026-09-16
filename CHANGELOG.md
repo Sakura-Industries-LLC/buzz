@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — Buzz DNTLS
+
+### Desktop changes
+
+- Fix concurrent DNTLS connections stalling on two-CPU machines after community
+  approval. The `TOKIO_WORKER_THREADS` workaround is no longer needed ([#47](https://github.com/Sakura-Industries-LLC/buzz/issues/47)).
+
 ## v0.5.20
 
 ### Desktop and shared changes
