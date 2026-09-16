@@ -59,6 +59,30 @@ fn validate_download_url(url: &str, relay_base: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate the community origin before mapping a durable media URL onto its connector.
+pub(crate) fn media_download_url(url: &str, state: &AppState) -> Result<String, String> {
+    let base = relay_api_base_url_with_override(state);
+    let canonical = crate::relay::auth_url_for_transport(state, &base);
+    relay_media_transport_url(url, &base, &canonical)
+}
+
+/// Preserve the media path and query without allowing the URL to choose a dial target.
+fn relay_media_transport_url(
+    url: &str,
+    transport_base: &str,
+    canonical_base: &str,
+) -> Result<String, String> {
+    validate_download_url(url, canonical_base)?;
+    if transport_base == canonical_base {
+        return Ok(url.to_string());
+    }
+    let source = url::Url::parse(url).map_err(|e| e.to_string())?;
+    let mut target = url::Url::parse(transport_base).map_err(|e| e.to_string())?;
+    target.set_path(source.path());
+    target.set_query(source.query());
+    Ok(target.to_string())
+}
+
 /// Download an image from a URL and save it via a native save-file dialog.
 #[tauri::command]
 pub async fn download_image(
@@ -67,8 +91,7 @@ pub async fn download_image(
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
     // SSRF protection: only allow downloads from the relay's /media/ path.
-    let relay_base = relay_api_base_url_with_override(&state);
-    validate_download_url(&url, &relay_base)?;
+    let url = media_download_url(&url, &state)?;
 
     // Infer filename from the URL path (e.g. "abcdef123.jpg" from a Blossom URL).
     let filename = url::Url::parse(&url)
@@ -114,8 +137,7 @@ pub async fn download_file(
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
     // SSRF protection: only allow downloads from the relay's /media/ path.
-    let relay_base = relay_api_base_url_with_override(&state);
-    validate_download_url(&url, &relay_base)?;
+    let url = media_download_url(&url, &state)?;
 
     // The imeta filename is the only human-readable name we have; sanitize it
     // so directory traversal / control characters can never reach the dialog.
@@ -157,8 +179,7 @@ pub async fn fetch_media_bytes(
     url: String,
     state: State<'_, AppState>,
 ) -> Result<tauri::ipc::Response, String> {
-    let relay_base = relay_api_base_url_with_override(&state);
-    validate_download_url(&url, &relay_base)?;
+    let url = media_download_url(&url, &state)?;
 
     let bytes = fetch_blob_bytes(&url, &state).await?;
     detect_and_validate_mime(&bytes)?;
@@ -180,8 +201,7 @@ pub async fn copy_image_to_clipboard(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let relay_base = relay_api_base_url_with_override(&state);
-    validate_download_url(&url, &relay_base)?;
+    let url = media_download_url(&url, &state)?;
 
     let bytes = fetch_blob_bytes(&url, &state).await?;
     detect_and_validate_mime(&bytes)?;
@@ -288,11 +308,9 @@ async fn fetch_blob_bytes_with_cap(
     // 3xx is returned verbatim and rejected by the `is_success` check below.
     let mut req = state.media_fetch_client.get(url).timeout(DOWNLOAD_TIMEOUT);
 
-    // Every caller pre-validates `url` against the relay origin via
-    // `validate_download_url`, satisfying the mint_media_get_auth safety
-    // contract (the token never leaves the relay origin).
-    let relay_base = relay_api_base_url_with_override(state);
-    if let Some(auth) = mint_media_get_auth(state, &relay_base) {
+    // Callers validate the canonical origin before mapping onto this transport.
+    // Sign against the captured destination, not a possibly switched workspace.
+    if let Some(auth) = mint_media_get_auth(state, url) {
         req = req.header("authorization", auth);
     }
 
@@ -460,8 +478,7 @@ pub async fn fetch_snapshot_bytes(
     state: State<'_, AppState>,
 ) -> Result<tauri::ipc::Response, String> {
     // ── Pre-fetch validation ──────────────────────────────────────────────
-    let relay_base = relay_api_base_url_with_override(&state);
-    validate_download_url(&url, &relay_base)?;
+    let url = media_download_url(&url, &state)?;
 
     // Sanitize the filename and verify it is a recognised snapshot extension.
     let filename = sanitize_filename(&filename);
@@ -526,6 +543,39 @@ pub async fn fetch_snapshot_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dntls_media_download_uses_current_connector_only_for_community_origin() {
+        let media = "https://buzz.dntls/media/abc.png?size=small";
+        for port in [43151, 43152] {
+            let transport = format!("http://127.0.0.1:{port}");
+            assert_eq!(
+                relay_media_transport_url(media, &transport, "https://buzz.dntls").unwrap(),
+                format!("{transport}/media/abc.png?size=small")
+            );
+            for rejected in [
+                "https://other.dntls/media/abc.png",
+                "https://buzz.dntls:8443/media/abc.png",
+                "http://buzz.dntls/media/abc.png",
+                "https://buzz.dntls/api/admin",
+                "https://buzz.dntls/media/../api/admin",
+            ] {
+                assert!(
+                    relay_media_transport_url(rejected, &transport, "https://buzz.dntls").is_err()
+                );
+            }
+        }
+        let ordinary = "https://relay.example:8443/media/abc.png";
+        assert_eq!(
+            relay_media_transport_url(
+                ordinary,
+                "https://relay.example:8443",
+                "https://relay.example:8443"
+            )
+            .unwrap(),
+            ordinary
+        );
+    }
 
     #[test]
     fn snapshot_kind_json_returns_json_kind_and_correct_cap() {

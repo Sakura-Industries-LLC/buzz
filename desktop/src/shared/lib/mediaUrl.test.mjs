@@ -33,7 +33,8 @@ test("media-proxy port store: resolved port publishes and reset notifies subscri
 
   globalThis.window = {
     __TAURI_INTERNALS__: {
-      invoke(command) {
+      invoke(command, args) {
+        if (command === "canonical_auth_url") return Promise.resolve(args.url);
         if (command === "get_media_proxy_port") return Promise.resolve(54321);
         if (command === "get_relay_http_url") {
           return Promise.resolve("https://relay.example");
@@ -279,7 +280,8 @@ test("resetMediaCaches: ignores relay origin lookups from the previous generatio
 
   globalThis.window = {
     __TAURI_INTERNALS__: {
-      invoke(command) {
+      invoke(command, args) {
+        if (command === "canonical_auth_url") return Promise.resolve(args.url);
         if (command === "get_media_proxy_port") return Promise.resolve(54321);
         if (command === "get_relay_http_url") {
           relayOriginCalls += 1;
@@ -322,7 +324,8 @@ test("rewriteRelayUrl: matches relay origin case-insensitively (uppercase saved 
 
   globalThis.window = {
     __TAURI_INTERNALS__: {
-      invoke(command) {
+      invoke(command, args) {
+        if (command === "canonical_auth_url") return Promise.resolve(args.url);
         if (command === "get_media_proxy_port") return Promise.resolve(54321);
         if (command === "get_relay_http_url") {
           // Saved community URLs keep the user's casing; the relay always
@@ -353,7 +356,8 @@ test("rewriteRelayUrl: still passes external Blossom URLs through unchanged", as
 
   globalThis.window = {
     __TAURI_INTERNALS__: {
-      invoke(command) {
+      invoke(command, args) {
+        if (command === "canonical_auth_url") return Promise.resolve(args.url);
         if (command === "get_media_proxy_port") return Promise.resolve(54321);
         if (command === "get_relay_http_url") {
           return Promise.resolve("https://relay.example");
@@ -369,6 +373,48 @@ test("rewriteRelayUrl: still passes external Blossom URLs through unchanged", as
 
     const externalUrl = `https://nostr.build/media/${HASH}.png`;
     assert.equal(mediaUrl.rewriteRelayUrl(externalUrl), externalUrl);
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
+test("DNTLS media keeps its durable origin across connector and proxy restarts", async () => {
+  const previousWindow = globalThis.window;
+  let connectorPort = 43151;
+  let proxyPort = 54321;
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke(command, args) {
+        if (command === "get_relay_http_url") {
+          return Promise.resolve(`http://127.0.0.1:${connectorPort}`);
+        }
+        if (command === "canonical_auth_url") {
+          assert.equal(args.url, `http://127.0.0.1:${connectorPort}`);
+          return Promise.resolve("https://buzz.dntls");
+        }
+        if (command === "get_media_proxy_port")
+          return Promise.resolve(proxyPort);
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      },
+    },
+  };
+  try {
+    const mediaUrl = await import(`./mediaUrl.ts?dntls=${Date.now()}`);
+    const storedUrl = `https://buzz.dntls/media/${HASH}.png`;
+    for (const port of [54321, 54322]) {
+      proxyPort = port;
+      connectorPort += 1;
+      mediaUrl.resetMediaCaches();
+      mediaUrl.ensureRelayOriginFetch();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(mediaUrl.getCachedRelayOrigin(), "https://buzz.dntls");
+      assert.equal(
+        mediaUrl.rewriteRelayUrl(storedUrl),
+        `http://127.0.0.1:${port}/media/${HASH}.png`,
+      );
+      const external = `https://other.dntls/media/${HASH}.png`;
+      assert.equal(mediaUrl.rewriteRelayUrl(external), external);
+    }
   } finally {
     globalThis.window = previousWindow;
   }

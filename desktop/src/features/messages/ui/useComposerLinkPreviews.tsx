@@ -1,17 +1,12 @@
 import * as React from "react";
 import { ImageOff, X } from "lucide-react";
 
-import { getRelayHttpUrl } from "@/shared/api/tauri";
 import { extractSupportedLinkPreviews } from "@/shared/lib/linkPreview";
 import { isValidLinkPreviewSnapshotCanonicalUrl } from "@/shared/lib/linkPreviewSnapshot";
 import {
   invalidateLinkPreviewPreparation,
   prepareLinkPreview,
 } from "@/features/messages/lib/linkPreviewPreparationStore";
-import {
-  beginRelayOriginFetch,
-  getCachedRelayOrigin,
-} from "@/shared/lib/mediaUrl";
 import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 import {
   isBuzzEntityPreview,
@@ -422,14 +417,6 @@ export function useComposerLinkPreviews(
 
   const isHrefReentering = (href: string) =>
     reenteringHrefsRef.current.has(href) || staleReenteredHrefs.includes(href);
-
-  React.useEffect(() => {
-    if (getCachedRelayOrigin()) return;
-    const publishRelayOrigin = beginRelayOriginFetch();
-    void getRelayHttpUrl()
-      .then((url) => publishRelayOrigin(url))
-      .catch(() => publishRelayOrigin(null));
-  }, []);
 
   React.useEffect(() => {
     const active = new Set(candidates.map((preview) => preview.href));

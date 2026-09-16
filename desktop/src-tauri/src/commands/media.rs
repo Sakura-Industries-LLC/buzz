@@ -52,6 +52,13 @@ fn extract_server_authority(url_str: &str) -> Option<String> {
     }
 }
 
+/// Resolve the signed authority independently of the connector's local dial address.
+fn blossom_server_authority(state: &AppState, base_url: &str) -> Result<String, String> {
+    crate::relay::dntls_community_for_transport(state, base_url)
+        .or_else(|| extract_server_authority(base_url))
+        .ok_or_else(|| "cannot derive server authority from relay URL".to_string())
+}
+
 /// Resolve the real filesystem path of an already-opened file descriptor.
 ///
 /// Returns the path the kernel associates with the inode, not the pathname
@@ -324,17 +331,15 @@ pub(crate) const MEDIA_GET_AUTH_EXPIRY_SECS: u64 = 600;
 /// header to requests bound for the relay origin itself.
 pub(crate) fn sign_blossom_get_auth_header(
     keys: &Keys,
-    base_url: &str,
+    server: &str,
     expiry_secs: u64,
 ) -> Result<String, String> {
-    let server = extract_server_authority(base_url)
-        .ok_or_else(|| "cannot derive server authority from relay URL".to_string())?;
     let now = Timestamp::now().as_secs();
     let tags = vec![
         Tag::parse(vec!["t", "get"]).map_err(|e| e.to_string())?,
         Tag::parse(vec!["expiration", &(now + expiry_secs).to_string()])
             .map_err(|e| e.to_string())?,
-        Tag::parse(vec!["server".to_string(), server]).map_err(|e| e.to_string())?,
+        Tag::parse(vec!["server", server]).map_err(|e| e.to_string())?,
     ];
     let event = EventBuilder::new(Kind::from(24242), "Get buzz-media")
         .tags(tags)
@@ -364,7 +369,10 @@ pub(crate) fn mint_media_get_auth(state: &AppState, base_url: &str) -> Option<St
             return None;
         }
     };
-    match sign_blossom_get_auth_header(&keys, base_url, MEDIA_GET_AUTH_EXPIRY_SECS) {
+    let signed = blossom_server_authority(state, base_url).and_then(|server| {
+        sign_blossom_get_auth_header(&keys, &server, MEDIA_GET_AUTH_EXPIRY_SECS)
+    });
+    match signed {
         Ok(header) => Some(header),
         Err(e) => {
             eprintln!("buzz-desktop: media get auth signing failed (unsigned request): {e}");
@@ -377,18 +385,16 @@ fn sign_blossom_upload_auth(
     keys: &Keys,
     sha256: &str,
     expiry_secs: u64,
-    base_url: &str,
+    server: &str,
 ) -> Result<nostr::Event, String> {
     let now = Timestamp::now().as_secs();
-    let mut tags = vec![
+    let tags = vec![
         Tag::parse(vec!["t", "upload"]).map_err(|e| e.to_string())?,
         Tag::parse(vec!["x", sha256]).map_err(|e| e.to_string())?,
         Tag::parse(vec!["expiration", &(now + expiry_secs).to_string()])
             .map_err(|e| e.to_string())?,
+        Tag::parse(vec!["server", server]).map_err(|e| e.to_string())?,
     ];
-    if let Some(domain) = extract_server_authority(base_url) {
-        tags.push(Tag::parse(vec!["server".to_string(), domain]).map_err(|e| e.to_string())?);
-    }
     EventBuilder::new(Kind::from(24242), "Upload buzz-media")
         .tags(tags)
         .sign_with_keys(keys)
@@ -439,7 +445,8 @@ async fn do_upload(
     let base_url = relay_api_base_url_with_override(state);
     let auth_event = {
         let keys = state.signing_keys()?;
-        sign_blossom_upload_auth(&keys, &sha256, expiry_secs, &base_url)?
+        let server = blossom_server_authority(state, &base_url)?;
+        sign_blossom_upload_auth(&keys, &sha256, expiry_secs, &server)?
     };
 
     let auth_header = format!(
@@ -846,7 +853,7 @@ mod tests {
     #[test]
     fn test_sign_blossom_get_auth_header_shape() {
         let keys = Keys::generate();
-        let header = sign_blossom_get_auth_header(&keys, "http://localhost:3000", 600).unwrap();
+        let header = sign_blossom_get_auth_header(&keys, "localhost:3000", 600).unwrap();
         let b64 = header.strip_prefix("Nostr ").expect("Nostr scheme prefix");
         let json = URL_SAFE_NO_PAD.decode(b64).unwrap();
         let event = nostr::Event::from_json(std::str::from_utf8(&json).unwrap()).unwrap();
@@ -871,8 +878,145 @@ mod tests {
 
     #[test]
     fn test_sign_blossom_get_auth_header_invalid_base_url() {
+        let state = crate::app_state::build_app_state();
+        assert!(blossom_server_authority(&state, "not-a-url").is_err());
+    }
+
+    #[test]
+    fn dntls_blossom_auth_uses_community_not_loopback() {
+        use buzz_media_pkg::auth::{verify_blossom_get_auth, verify_blossom_upload_auth};
+
+        let state = crate::app_state::build_app_state();
+        *state.relay_url_override.lock().unwrap() = Some("ws://127.0.0.1:43151".into());
+        *state.canonical_relay_host.lock().unwrap() = Some("buzz.dntls".into());
+        let base = relay_api_base_url_with_override(&state);
+        let server = blossom_server_authority(&state, &base).unwrap();
         let keys = Keys::generate();
-        assert!(sign_blossom_get_auth_header(&keys, "not-a-url", 600).is_err());
+        let hash = "ab".repeat(32);
+        let upload = sign_blossom_upload_auth(&keys, &hash, 300, &server).unwrap();
+        assert_eq!(
+            upload
+                .tags
+                .iter()
+                .find(|tag| tag.as_slice()[0] == "server")
+                .unwrap()
+                .as_slice()[1],
+            "buzz.dntls"
+        );
+        verify_blossom_upload_auth(&upload, &hash, Some("buzz.dntls"), 600).unwrap();
+        let header = sign_blossom_get_auth_header(&keys, &server, 600).unwrap();
+        let json = URL_SAFE_NO_PAD
+            .decode(header.strip_prefix("Nostr ").unwrap())
+            .unwrap();
+        let get = nostr::Event::from_json(json).unwrap();
+        verify_blossom_get_auth(&get, &hash, Some("buzz.dntls"), 600).unwrap();
+
+        let wrong = sign_blossom_upload_auth(&keys, &hash, 300, "127.0.0.1:43151").unwrap();
+        assert!(matches!(
+            verify_blossom_upload_auth(&wrong, &hash, Some("buzz.dntls"), 600),
+            Err(buzz_media_pkg::error::MediaError::ServerMismatch)
+        ));
+        assert_eq!(
+            blossom_server_authority(&state, "https://relay.example:8443").unwrap(),
+            "relay.example:8443"
+        );
+    }
+
+    #[tokio::test]
+    async fn dntls_upload_and_reload_media_over_loopback() {
+        use axum::{body::Bytes, http::HeaderMap, routing::put, Json, Router};
+        use buzz_media_pkg::auth::{verify_blossom_get_auth, verify_blossom_upload_auth};
+
+        let body = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/icons/32x32.png")).unwrap();
+        let body = sanitize_image_for_upload(body, "image/png").unwrap();
+        let hash = hex::encode(Sha256::digest(&body));
+        let uploaded_body = body.clone();
+        let uploaded_hash = hash.clone();
+        let stored_url = format!("https://buzz.dntls/media/{hash}.png");
+        let descriptor_url = stored_url.clone();
+        let app = Router::new()
+            .route(
+                "/upload",
+                put(move |headers: HeaderMap, bytes: Bytes| {
+                    let hash = uploaded_hash.clone();
+                    let expected = uploaded_body.clone();
+                    let url = descriptor_url.clone();
+                    async move {
+                        let header = headers["authorization"].to_str().unwrap();
+                        let event = nostr::Event::from_json(
+                            URL_SAFE_NO_PAD
+                                .decode(header.strip_prefix("Nostr ").unwrap())
+                                .unwrap(),
+                        )
+                        .unwrap();
+                        verify_blossom_upload_auth(&event, &hash, Some("buzz.dntls"), 600).unwrap();
+                        assert_eq!(bytes.as_ref(), expected);
+                        Json(BlobDescriptor {
+                            url,
+                            sha256: hash,
+                            size: bytes.len() as u64,
+                            mime_type: "image/png".into(),
+                            uploaded: 0,
+                            dim: None,
+                            blurhash: None,
+                            thumb: None,
+                            duration: None,
+                            image: None,
+                            filename: None,
+                        })
+                    }
+                }),
+            )
+            .route(
+                &format!("/media/{hash}.png"),
+                axum::routing::get(move |headers: HeaderMap| {
+                    let bytes = body.clone();
+                    let hash = hash.clone();
+                    async move {
+                        let header = headers["authorization"].to_str().unwrap();
+                        let event = nostr::Event::from_json(
+                            URL_SAFE_NO_PAD
+                                .decode(header.strip_prefix("Nostr ").unwrap())
+                                .unwrap(),
+                        )
+                        .unwrap();
+                        verify_blossom_get_auth(&event, &hash, Some("buzz.dntls"), 600).unwrap();
+                        bytes
+                    }
+                }),
+            );
+        // A new listener and app state model a restart; the persisted descriptor
+        // must work without retaining either loopback port or the old token.
+        for restart in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let router = app.clone();
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let mut state = crate::app_state::build_app_state();
+            *state.relay_url_override.get_mut().unwrap() = Some(base.replace("http://", "ws://"));
+            *state.canonical_relay_host.get_mut().unwrap() = Some("buzz.dntls".into());
+            if !restart {
+                let image =
+                    std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/icons/32x32.png")).unwrap();
+                let descriptor = upload_image_bytes(image, &state).await.unwrap();
+                assert_eq!(descriptor.url, stored_url);
+            }
+            let transport =
+                super::super::media_download::media_download_url(&stored_url, &state).unwrap();
+            assert!(transport.starts_with(&base));
+            let response = state
+                .media_fetch_client
+                .get(&transport)
+                .header("authorization", mint_media_get_auth(&state, &base).unwrap())
+                .send()
+                .await
+                .unwrap();
+            assert!(response.status().is_success());
+            let loaded = response.bytes().await.unwrap();
+            let image = image::load_from_memory(&loaded).unwrap();
+            assert_eq!((image.width(), image.height()), (32, 32));
+            server.abort();
+        }
     }
 
     #[test]

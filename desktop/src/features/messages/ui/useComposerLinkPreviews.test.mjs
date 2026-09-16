@@ -30,6 +30,7 @@ before(() => {
   });
   dom.window.__TAURI_INTERNALS__ = {
     invoke: (cmd, args) => {
+      if (cmd === "canonical_auth_url") return Promise.resolve(args.url);
       const handler = ipcHandlers.get(cmd);
       return handler
         ? handler(args)

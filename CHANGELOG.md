@@ -10,6 +10,9 @@
   including members without profiles. Refresh the sidebar identity after replacing
   credentials, and stop publishing profile nicknames during DNTLS onboarding
   ([#50](https://github.com/Sakura-Industries-LLC/buzz/issues/50)).
+- Fix image and attachment uploads returning `401 Unauthorized` in DNTLS
+  communities. Media reads and downloads use the community's authenticated
+  connection, including after restarting Buzz ([#51](https://github.com/Sakura-Industries-LLC/buzz/issues/51)).
 
 ## v0.5.20
 
