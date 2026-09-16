@@ -191,7 +191,9 @@ async function fetchProxyPort(): Promise<number | null> {
       const publishRelayOrigin = beginRelayOriginFetch();
       try {
         const url = await withDeadline(
-          invoke<string>("get_relay_http_url"),
+          invoke<string>("get_relay_http_url").then((url) =>
+            invoke<string>("canonical_auth_url", { url }),
+          ),
           deadline,
         );
         if (url !== null) publishRelayOrigin(canonicalOrigin(url));

@@ -156,6 +156,11 @@ lists, mentions, and direct messages, even when the member has not set a
 profile nickname. A nickname does not override a verified name. The community
 line below the chip shows which verified identity is active there.
 
+Images and attachments in DNTLS communities use Buzz's authenticated connection.
+Their saved URLs retain the community name, so reopening Buzz does not depend
+on the previous connection's local address. You do not need a separate browser
+resolver to view them in Buzz.
+
 Development builds can select a different Portal with
 `BUZZ_DNTLS_PORTAL_URL`; packaged release builds use
 `https://preview.dntls.net`.
