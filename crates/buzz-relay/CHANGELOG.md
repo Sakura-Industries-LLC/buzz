@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## relay-v0.5.1
 
 - Record the nearest approved ancestor when a new non-admin name joins with
   `BUZZ_DNTLS_ADMISSION=auto`. The names API and signed membership snapshot
