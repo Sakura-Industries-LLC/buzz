@@ -90,6 +90,30 @@ async fn lock_application_bindings(
     Ok(())
 }
 
+/// Find the nearest approved ancestor within this community's binding transaction.
+async fn approved_ancestor<'a>(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community: CommunityId,
+    fqdn: &'a str,
+) -> Result<Option<(String, &'a str)>> {
+    let mut ancestor = fqdn;
+    while let Some((_, parent)) = ancestor.split_once('.') {
+        ancestor = parent;
+        let pubkey: Option<String> = sqlx::query_scalar(
+            "SELECT pubkey FROM dntls_applications \
+             WHERE community_id = $1 AND fqdn = $2 AND status = 'approved'",
+        )
+        .bind(community.as_uuid())
+        .bind(ancestor)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(pubkey) = pubkey {
+            return Ok(Some((pubkey, ancestor)));
+        }
+    }
+    Ok(None)
+}
+
 /// Insert or replace this pubkey's pending application after a verified name.
 ///
 /// A *different* pubkey's pending mapping for `fqdn` is replaced, keeping
@@ -273,20 +297,7 @@ pub async fn upsert_pending_application(
         }
     }
 
-    let mut ancestor = fqdn;
-    while let Some((_, parent)) = ancestor.split_once('.') {
-        ancestor = parent;
-        let approved_by: Option<String> = sqlx::query_scalar(
-            "SELECT pubkey FROM dntls_applications \
-             WHERE community_id = $1 AND fqdn = $2 AND status = 'approved'",
-        )
-        .bind(community.as_uuid())
-        .bind(ancestor)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let Some(approved_by) = approved_by else {
-            continue;
-        };
+    if let Some((approved_by, ancestor)) = approved_ancestor(&mut tx, community, fqdn).await? {
         sqlx::query(
             "UPDATE dntls_applications \
              SET status = 'approved', approved_at = now(), approved_by = $3, admitted_via_parent = $4 \
@@ -321,11 +332,16 @@ pub async fn upsert_pending_application(
 ///
 /// The caller must have proved `fqdn` and possession of `pubkey`. The name's
 /// previous pending or approved mapping is replaced atomically, including
-/// under concurrent claims. Repeating the same approved mapping is a no-op.
+/// under concurrent claims. Repeating the same approved mapping is a no-op,
+/// except that a configured admin's former parent provenance is cleared.
 ///
 /// A pending application by this pubkey for another name is replaced. An
 /// approved mapping for another name is preserved: the transaction rolls back
 /// and returns [`UpsertJoinOutcome::NameAlreadyClaimed`].
+///
+/// New non-admin admissions record their nearest approved DNTLS ancestor in
+/// this community, if any. An approved name retains its recorded provenance
+/// across key rebinding; configured admins never carry parent provenance.
 ///
 /// When `is_admin` is false, ordinary membership is unchanged — the relay
 /// still claims `member` via [`crate::relay_members::claim_relay_membership`].
@@ -356,37 +372,54 @@ pub async fn upsert_approved_application(
 
     // PostgreSQL 17 cannot return OLD from ON CONFLICT. The community lock
     // protects this pre-read even if another claim moves a pending name.
-    let previous: Option<String> = sqlx::query_scalar(
-        "SELECT pubkey FROM dntls_applications \
+    let previous = sqlx::query(
+        "SELECT pubkey, status, admitted_via_parent FROM dntls_applications \
          WHERE community_id = $1 AND fqdn = $2",
     )
     .bind(community.as_uuid())
     .bind(fqdn)
     .fetch_optional(&mut *tx)
     .await?;
+    let admitted_via_parent: Option<String> = if is_admin {
+        None
+    } else if let Some(row) = previous
+        .as_ref()
+        .filter(|row| row.get::<&str, _>("status") == "approved")
+    {
+        row.get("admitted_via_parent")
+    } else {
+        approved_ancestor(&mut tx, community, fqdn)
+            .await?
+            .map(|(_, ancestor)| ancestor.to_owned())
+    };
 
     // The pubkey primary key still forbids a second approved name on this key.
     let binding = sqlx::query(
         "INSERT INTO dntls_applications \
-         (community_id, pubkey, fqdn, status, approved_at, approved_by) \
-         VALUES ($1, $2, $3, 'approved', now(), $4) \
+         (community_id, pubkey, fqdn, status, approved_at, approved_by, admitted_via_parent) \
+         VALUES ($1, $2, $3, 'approved', now(), $4, $5) \
          ON CONFLICT (community_id, fqdn) DO UPDATE \
          SET pubkey = EXCLUDED.pubkey, status = 'approved', \
              created_at = CASE WHEN dntls_applications.pubkey = EXCLUDED.pubkey \
                  THEN dntls_applications.created_at ELSE EXCLUDED.created_at END, \
-             approved_at = EXCLUDED.approved_at, approved_by = EXCLUDED.approved_by \
+             approved_at = EXCLUDED.approved_at, approved_by = EXCLUDED.approved_by, \
+             admitted_via_parent = EXCLUDED.admitted_via_parent \
          WHERE dntls_applications.pubkey <> EXCLUDED.pubkey \
-             OR dntls_applications.status IN ('pending', 'rejected')",
+             OR dntls_applications.status IN ('pending', 'rejected') \
+             OR dntls_applications.admitted_via_parent IS DISTINCT FROM EXCLUDED.admitted_via_parent",
     )
     .bind(community.as_uuid())
     .bind(pubkey)
     .bind(fqdn)
     .bind(approved_by)
+    .bind(admitted_via_parent)
     .execute(&mut *tx)
     .await;
     match binding {
         Ok(_) => {
-            let displaced = previous.filter(|held| held != pubkey);
+            let displaced = previous
+                .map(|row| row.get::<String, _>("pubkey"))
+                .filter(|held| held != pubkey);
             let membership_changed = if is_admin {
                 if let Some(old) = displaced.as_deref() {
                     super::relay_members::demote_relay_admin_to_member_on(&mut tx, community, old)

@@ -17,6 +17,8 @@
 //! it is an owner. A newly verified key may replace a rejected mapping.
 //! In `approve` mode, subnames inherit membership (not admin) from the nearest
 //! approved DNTLS ancestor in this community, attributed to that ancestor's key.
+//! In `auto` mode, new non-admin admissions record that same ancestor provenance
+//! and keep it on key rebinding. Configured admins are not agents.
 //!
 //! HTTP routes (all NIP-98 signed, outside the Nostr event data plane):
 //!
@@ -830,6 +832,21 @@ mod tests {
         }
         let authenticated = matches!(*conn.auth_state.read().await, AuthState::Authenticated(_));
         (authenticated, messages)
+    }
+
+    async fn list_names(state: Arc<AppState>, host: &str, keys: &Keys) -> Value {
+        let response = send(state, host, Method::GET, NAMES_PATH, keys, String::new()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        read_json(response).await
+    }
+
+    fn name_entry<'a>(names: &'a Value, fqdn: &str) -> &'a Value {
+        names["names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["fqdn"] == fqdn)
+            .unwrap_or_else(|| panic!("missing {fqdn} in {names}"))
     }
 
     #[test]
@@ -2796,5 +2813,214 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.fqdn, "fizz.josh.dntls");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_auto_records_parent_agent_and_keeps_it_on_rebind() {
+        let host = format!("dntls-auto-agent-{}.example", Uuid::new_v4().simple());
+        let mut state = dntls_test_state_on(&host, DntlsAdmission::Auto, TEST_REDIS_URL)
+            .await
+            .expect("requires reachable Postgres, Redis, and relay test state");
+        Arc::make_mut(&mut Arc::get_mut(&mut state).expect("unique state").config).dntls_admins =
+            vec!["ops.alice.dntls".to_string()];
+        let alice = Keys::generate();
+        let fizz = Keys::generate();
+        let fizz2 = Keys::generate();
+        let bob = Keys::generate();
+        let ops = Keys::generate();
+        let alice2 = Keys::generate();
+        let nested = Keys::generate();
+        let nested2 = Keys::generate();
+
+        for (keys, name) in [
+            (&alice, "alice.dntls"),
+            (&nested, "bot.fizz.alice.dntls"),
+            (&fizz, "fizz.alice.dntls"),
+            (&bob, "bob.dntls"),
+            (&ops, "ops.alice.dntls"),
+        ] {
+            let (ok, messages) = auth_connection(state.clone(), &host, keys, Some(name)).await;
+            assert!(ok, "{name}: {messages:?}");
+        }
+
+        let names = list_names(state.clone(), &host, &alice).await;
+        assert_eq!(
+            name_entry(&names, "fizz.alice.dntls")["pubkey"],
+            fizz.public_key().to_hex()
+        );
+        assert_eq!(name_entry(&names, "fizz.alice.dntls")["agent"], true);
+        assert_eq!(
+            name_entry(&names, "fizz.alice.dntls")["owner"],
+            "alice.dntls"
+        );
+        assert_eq!(name_entry(&names, "bob.dntls")["agent"], false);
+        assert!(name_entry(&names, "bob.dntls")["owner"].is_null());
+        assert_eq!(name_entry(&names, "alice.dntls")["agent"], false);
+        assert!(name_entry(&names, "alice.dntls")["owner"].is_null());
+        assert_eq!(name_entry(&names, "ops.alice.dntls")["agent"], false);
+        assert!(name_entry(&names, "ops.alice.dntls")["owner"].is_null());
+
+        let response = send(
+            state.clone(),
+            &host,
+            Method::POST,
+            "/query",
+            &alice,
+            r#"[{"kinds":[13534]}]"#.to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let events = read_json(response).await;
+        let snapshot = events
+            .as_array()
+            .expect("events")
+            .iter()
+            .find(|event| event["kind"] == 13534)
+            .expect("membership snapshot");
+        let tags = snapshot["tags"].as_array().expect("tags");
+        let fizz_hex = fizz.public_key().to_hex();
+        assert!(
+            tags.iter().any(|tag| {
+                tag[0] == "dntls-agent" && tag[1] == fizz_hex && tag[2] == "alice.dntls"
+            }),
+            "missing fizz agent tag: {snapshot}"
+        );
+        for (keys, label) in [(&alice, "alice"), (&bob, "bob"), (&ops, "ops")] {
+            let hex = keys.public_key().to_hex();
+            assert!(
+                tags.iter()
+                    .all(|tag| !(tag[0] == "dntls-agent" && tag[1] == hex)),
+                "{label} must not be tagged as an agent: {snapshot}"
+            );
+        }
+
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .unwrap()
+            .unwrap();
+        let (ok, messages) =
+            auth_connection(state.clone(), &host, &fizz2, Some("fizz.alice.dntls")).await;
+        assert!(ok, "fizz rebind: {messages:?}");
+        assert!(
+            state
+                .db
+                .is_relay_member(community.id, &fizz.public_key().to_hex())
+                .await
+                .unwrap(),
+            "auto rebind retains the displaced key"
+        );
+        let (ok, messages) =
+            auth_connection(state.clone(), &host, &alice2, Some("alice.dntls")).await;
+        assert!(ok, "alice rebind: {messages:?}");
+
+        let names = list_names(state.clone(), &host, &fizz2).await;
+        assert_eq!(
+            name_entry(&names, "fizz.alice.dntls")["pubkey"],
+            fizz2.public_key().to_hex()
+        );
+        assert_eq!(name_entry(&names, "fizz.alice.dntls")["agent"], true);
+        assert_eq!(
+            name_entry(&names, "fizz.alice.dntls")["owner"],
+            "alice.dntls"
+        );
+
+        // A nearer ancestor joined after this name: rebinding keeps the original owner.
+        let (ok, messages) =
+            auth_connection(state.clone(), &host, &nested2, Some("bot.fizz.alice.dntls")).await;
+        assert!(ok, "nested rebind: {messages:?}");
+        let newcomer = Keys::generate();
+        let (ok, messages) = auth_connection(
+            state.clone(),
+            &host,
+            &newcomer,
+            Some("new.fizz.alice.dntls"),
+        )
+        .await;
+        assert!(ok, "nearest ancestor admission: {messages:?}");
+        let names = list_names(state.clone(), &host, &nested2).await;
+        assert_eq!(name_entry(&names, "bot.fizz.alice.dntls")["agent"], true);
+        assert_eq!(
+            name_entry(&names, "bot.fizz.alice.dntls")["owner"],
+            "alice.dntls"
+        );
+        assert_eq!(
+            name_entry(&names, "new.fizz.alice.dntls")["owner"],
+            "fizz.alice.dntls"
+        );
+
+        let mut promoted = dntls_test_state_on(&host, DntlsAdmission::Auto, TEST_REDIS_URL)
+            .await
+            .expect("reopen with promoted admin");
+        Arc::make_mut(&mut Arc::get_mut(&mut promoted).expect("unique state").config)
+            .dntls_admins = vec!["fizz.alice.dntls".to_string()];
+        let (ok, messages) =
+            auth_connection(promoted.clone(), &host, &fizz2, Some("fizz.alice.dntls")).await;
+        assert!(ok, "promoted admin AUTH: {messages:?}");
+        let names = list_names(promoted.clone(), &host, &fizz2).await;
+        assert_eq!(name_entry(&names, "fizz.alice.dntls")["agent"], false);
+        assert!(name_entry(&names, "fizz.alice.dntls")["owner"].is_null());
+        assert_eq!(
+            promoted
+                .db
+                .get_relay_member(community.id, &fizz2.public_key().to_hex())
+                .await
+                .unwrap()
+                .unwrap()
+                .role,
+            "admin"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dntls_auto_agent_requires_approved_ancestor_in_community() {
+        for (label, parent_name, child_name) in [
+            ("foreign", "josh.dntls", "fizz.josh.dntls"),
+            ("suffix", "alice.dntls", "fizz.notalice.dntls"),
+        ] {
+            let host = format!(
+                "dntls-auto-agent-{label}-{}.example",
+                Uuid::new_v4().simple()
+            );
+            let state = dntls_test_state_on(&host, DntlsAdmission::Auto, TEST_REDIS_URL)
+                .await
+                .expect("requires reachable Postgres, Redis, and relay test state");
+            let parent = Keys::generate();
+            if label == "foreign" {
+                let foreign = state
+                    .db
+                    .ensure_configured_community(&format!("other-{host}"))
+                    .await
+                    .unwrap()
+                    .id;
+                let parent_hex = parent.public_key().to_hex();
+                state
+                    .db
+                    .upsert_dntls_approved_application(
+                        foreign,
+                        &parent_hex,
+                        parent_name,
+                        &parent_hex,
+                        false,
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                let (ok, messages) =
+                    auth_connection(state.clone(), &host, &parent, Some(parent_name)).await;
+                assert!(ok, "{label} parent AUTH: {messages:?}");
+            }
+            let child = Keys::generate();
+            let (ok, messages) =
+                auth_connection(state.clone(), &host, &child, Some(child_name)).await;
+            assert!(ok, "{label} child AUTH: {messages:?}");
+            let names = list_names(state, &host, &child).await;
+            let entry = name_entry(&names, child_name);
+            assert_eq!(entry["agent"], false, "{label}");
+            assert!(entry["owner"].is_null(), "{label}: {entry}");
+        }
     }
 }

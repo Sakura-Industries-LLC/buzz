@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Record the nearest approved ancestor when a new non-admin name joins with
+  `BUZZ_DNTLS_ADMISSION=auto`. The names API and signed membership snapshot
+  identify these members as agents and name their owner
+  ([#59](https://github.com/Sakura-Industries-LLC/buzz/issues/59)).
+- Preserve the recorded parent on key rebinding, even if a nearer ancestor has
+  since joined. Names without an approved ancestor remain direct members.
+  Configured admin names are not agents, including after promotion.
+- Automatic admission still requires no approval or pending request. Existing
+  approved bindings keep their recorded provenance; this does not backfill
+  previously admitted names. No new database migration is required.
+
 ## relay-v0.5.0
 
 Agents admitted through a parent name are discoverable as agents. Database
